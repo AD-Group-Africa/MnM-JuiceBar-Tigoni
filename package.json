@@ -1,0 +1,25 @@
+{
+  "name": "mnm-tickets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MnM Tickets — digital ticket vending and authorised event resale platform. Operated by MnM Juice Bar (Kabuku, Limuru), platform by Afrika Digitalis (AD Group).",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/gen-qr.mjs --help >/dev/null 2>&1 || true",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node --import tsx src/server.ts",
+    "test": "node --import tsx --test tests/*.test.mts tests/*.mt.ts tests/unit/*.mts 2>&1 || node --import tsx --test tests/*.ts",
+    "seed": "tsx db/seed.ts",
+    "migrate": "tsx src/db.ts --migrate"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
