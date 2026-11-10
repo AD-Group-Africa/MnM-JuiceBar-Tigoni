@@ -64,8 +64,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       (k) => !env[k],
     );
     if (missing.length) {
-      console.warn(
-        `[config] PAYMENT_PROVIDER=daraja in production but missing: ${missing.join(", ")} — falling back to dev simulator. Live payments BLOCKED until configured.`,
+      throw new Error(
+        `[config] PAYMENT_PROVIDER=daraja in production but missing required credentials: ${missing.join(", ")}. Set all five env vars or switch PAYMENT_PROVIDER=dev to use the simulator.`,
       );
     }
   }

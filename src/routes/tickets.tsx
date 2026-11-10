@@ -70,6 +70,12 @@ function ticketsPage(order: Record<string, unknown>, config: AppConfig) {
         <br />📍 {String(ev.venue_name)}, {String(ev.venue_area)} · {sum} ticket{sum === 1 ? "" : "s"} ·{" "}
         {formatMinor(Number(order.total_minor), String(order.currency))}
       </p>
+      {config.paymentProvider === "dev" ? (
+        <p class="notice warn" role="status">
+          <strong>Development payment simulator — no real money moved.</strong>{" "}
+          These tickets were issued by the local simulator, not by live M-Pesa.
+        </p>
+      ) : null}
       <p class="hint">Screenshot each ticket or keep this page. Gate staff scan the QR — it is verified live against our system each time.</p>
       {tickets.map((t, i) => {
         const status = String(t.status);

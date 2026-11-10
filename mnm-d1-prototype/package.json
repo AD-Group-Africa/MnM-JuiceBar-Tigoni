@@ -1,0 +1,16 @@
+{
+  "name": "mnm-d1-prototype",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "tsx prototype.test.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.5.0"
+  }
+}

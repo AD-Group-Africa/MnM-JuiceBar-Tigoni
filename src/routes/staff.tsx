@@ -98,6 +98,10 @@ export function authRoutes(config: AppConfig): Hono {
     createSession(Number(user!.id), ip, token);
     setSessionCookie(c, token, config);
     if (!safeNext(next)) return c.redirect("/staff");
+    // A gate scanner has no dashboard clearance: send them to the scan console
+    // instead of /staff, which would bounce them straight back to sign-in.
+    const role = user!.role as Parameters<typeof roleAllows>[0];
+    if (next === "/staff" && !roleAllows(role, "reports")) return c.redirect("/staff/scan");
     return c.redirect(next);
     function safeNext(n: string): boolean {
       return n.startsWith("/") && !n.startsWith("//");

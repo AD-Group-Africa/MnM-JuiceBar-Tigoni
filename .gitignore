@@ -10,3 +10,11 @@ data/*.sqlite*
 .DS_Store
 node_modules/**/.bin
 .claude
+
+# Local runtime artifacts (never commit)
+*.pid
+b1.*
+c4*.out
+c4*.err
+cycle*.log
+data/_backup_*/

@@ -57,14 +57,19 @@ function setCookieFrom(res: Response): void {
   if (sc) cookie = sc.split(";")[0]!;
 }
 
-test("home shows only on-sale events", async () => {
+test("home is the MnM Juice Bar storefront and /events lists only on-sale events", async () => {
+  // The juice storefront is the primary business: "/" is the MnM Juice Bar homepage.
   const home = await req("GET", "/");
   const t = await home.text();
-  assert.match(t, /HTTP Test Event/);
+  assert.match(t, /MnM Juice Bar/);
+  assert.match(t, /Our menu/);
   assert.ok(!t.includes("Secret Draft"), "draft must not leak");
+
+  // The ticketing module keeps its own page.
   const events = await (await req("GET", "/events")).text();
+  assert.match(events, /HTTP Test Event/);
   assert.match(events, /pub-ev/);
-  assert.ok(!events.includes("draft-ev"));
+  assert.ok(!events.includes("draft-ev"), "draft event must not be listed");
 });
 
 test("draft event page is 404", async () => {
@@ -89,7 +94,7 @@ test("login rejects cross-origin posts (CSRF origin check)", async () => {
 test("logout invalidates the session server-side", async () => {
   const res = await req("POST", "/staff/login", new URLSearchParams({ phone: "+254700000020", password: "ownerpw", next: "/staff" }), { Origin: BASE });
   setCookieFrom(res);
-  const out = await req("POST", "/staff/logout", null, { Origin: BASE });
+  const out = await req("POST", "/staff/logout", undefined, { Origin: BASE });
   assert.equal(out.status, 302);
   cookie = "";
 });

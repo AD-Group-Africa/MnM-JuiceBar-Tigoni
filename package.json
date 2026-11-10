@@ -12,8 +12,11 @@
     "build": "tsc -p tsconfig.build.json && node scripts/gen-qr.mjs --help >/dev/null 2>&1 || true",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node --import tsx src/server.ts",
-    "test": "node --import tsx --test tests/*.test.mts tests/*.mt.ts tests/unit/*.mts 2>&1 || node --import tsx --test tests/*.ts",
-    "seed": "tsx db/seed.ts",
+    "test": "node scripts/run-tests.mjs",
+    "seed": "tsx db/seed.ts && tsx db/seed-demo.ts",
+    "seed:demo": "tsx db/seed-demo.ts",
+    "images": "node scripts/generate-product-images.mjs",
+    "setup": "npm run migrate && npm run seed && npm run images",
     "migrate": "tsx src/db.ts --migrate"
   },
   "dependencies": {

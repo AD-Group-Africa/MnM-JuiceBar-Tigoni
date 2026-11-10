@@ -11,7 +11,7 @@ import type { AppConfig } from "../config.ts";
 import { SESSION_COOKIE, getSessionUser, roleAllows, stateChangeOriginAllowed } from "../auth.ts";
 import { verifyTicket, redeemTicket } from "../tickets.ts";
 import { queryAll } from "../db.ts";
-import { Page } from "../views/layout.tsx";
+import { Page, StaffPage } from "../views/layout.tsx";
 
 const verifyHits = new Map<string, { n: number; resetAt: number }>();
 function rateLimit(key: string, max: number, windowMs: number): boolean {
@@ -74,7 +74,7 @@ export function scanRoutes(config: AppConfig): Hono {
     const user = getSessionUser(getCookie(c, SESSION_COOKIE));
     if (!user || !roleAllows(user.role, "scan")) return c.redirect("/staff/login?next=/staff/scan");
     return c.html(
-      <Page title="Scan tickets" active="/staff/scan">
+      <StaffPage title="Scan tickets" active="/staff/scan">
         <h1>Scan a ticket</h1>
         <p class="muted">Enter or type the ticket code printed under the QR. Redemption is verified live, once, and audited.</p>
         <div class="narrow">
@@ -92,7 +92,7 @@ export function scanRoutes(config: AppConfig): Hono {
             {scanTable(recentScans(user.id))}
           </div>
         </div>
-      </Page>,
+      </StaffPage>,
     );
   });
 
@@ -105,7 +105,7 @@ export function scanRoutes(config: AppConfig): Hono {
       const raw = String(body.code ?? "").trim().toUpperCase();
       const r = redeemTicket(raw, user.id);
       return c.html(
-        <Page title="Scan result">
+        <StaffPage title="Scan result" active="/staff/scan">
           <div class="narrow scan-result">
             <div class={`panel ${r.result.ok ? "notice ok" : "notice bad"}`} style={r.result.ok ? "background:var(--ok-soft)" : "background:var(--danger-soft)"}>
               <div class={`big-status ${r.result.ok ? "ok" : "bad"}`}>{r.result.ok ? "ADMIT" : "DO NOT ADMIT"}</div>
@@ -115,7 +115,7 @@ export function scanRoutes(config: AppConfig): Hono {
             </div>
             <p style="margin-top:14px"><a class="btn btn-primary" href="/staff/scan">Scan next ticket</a></p>
           </div>
-        </Page>,
+        </StaffPage>,
       );
     }
   });

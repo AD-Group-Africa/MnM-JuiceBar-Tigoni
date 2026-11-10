@@ -21,7 +21,17 @@ export function checkoutRoutes(config: AppConfig): Hono {
   const provider = getProvider(config);
 
   app.post("/checkout", async (c) => {
-    const originOk = (c.req.header("origin") ?? c.req.header("referer") ?? "").startsWith(config.publicOrigins[0] ?? "http://localhost:8787");
+    const originOk = (() => {
+    const origin = c.req.header("origin") ?? c.req.header("referer") ?? "";
+    if (!origin) return false;
+    try {
+      const o = new URL(origin);
+      const a = new URL(config.publicOrigins[0] ?? "http://localhost:8787");
+      return o.protocol === a.protocol && o.host === a.host;
+    } catch {
+      return false;
+    }
+  })();
     if (!originOk) return c.html(<Page title="Blocked"><div class="panel notice bad">Cross-origin checkout is not allowed.</div></Page>, 403);
     const form = await c.req.parseBody();
     const categoryId = Number(form.category_id);
@@ -77,12 +87,15 @@ void signGuestLink;
 
 async function simulatedCallbackProvider(providerRequestId: string, totalMinor: number, config: AppConfig): Promise<void> {
   // Same code path as daraja's parseDarajaCallback → handleCallback; keeps a single tested flow.
+  // PAYMENT_DEV_FORCE_STATUS=failure makes the simulator emit a DECLINED callback so
+  // the failed-payment path can be demonstrated without any real money.
+  const forceFailure = config.paymentDevForceStatus === "failure";
   const body = JSON.stringify({
     Body: { stkCallback: {
       MerchantRequestID: `SIM-${Date.now()}`,
       CheckoutRequestID: providerRequestId,
-      ResultCode: 0,
-      ResultDesc: "Simulated success",
+      ResultCode: forceFailure ? 1032 : 0,
+      ResultDesc: forceFailure ? "Simulated failure — Request timeout by user" : "Simulated success",
       CallbackMetadata: { Item: [
         { Name: "Amount", Value: totalMinor / 100 },
         { Name: "MpesaReceiptNumber", Value: `SIM${Date.now().toString(36).toUpperCase()}` },
@@ -91,7 +104,7 @@ async function simulatedCallbackProvider(providerRequestId: string, totalMinor: 
     } },
   });
   const parsed = (await import("../payments/daraja.ts")).parseDarajaCallback(body) as
-    { providerRequestId: string; outcome: "succeeded"; amountMinor: number; providerRef: string } | null;
+    { providerRequestId: string; outcome: "succeeded" | "failed"; amountMinor?: number; providerRef?: string } | null;
   if (!parsed) throw new Error("sim callback parse failed");
   handleCallback({ provider: config.paymentProvider, ...parsed, raw: body });
 }
@@ -129,6 +142,13 @@ function orderStatusPage(order: Record<string, unknown>, token: string, config: 
           <div class="steps"><span class="on">1 Order</span> ▸ <span class={issued ? "on" : ""}>2 Pay</span> ▸ <span class={issued ? "on" : ""}>3 Tickets</span></div>
           <h1>{issued ? "Asante! Your tickets are ready" : `Order ${ref}`}</h1>
           <p class="muted">{String(ev.title)} · {String(ev.venue_name)}, {String(ev.venue_area)}</p>
+          {config.paymentProvider === "dev" ? (
+            <p class="notice warn" role="status">
+              <strong>Development payment simulator — no real money moved.</strong>{" "}
+              This order was settled by the local simulator; no M-Pesa prompt was sent and no card was charged.
+              Live M-Pesa requires <code>PAYMENT_PROVIDER=daraja</code> with Safaricom Daraja credentials.
+            </p>
+          ) : null}
           <dl class="kv">
             <dt>Status</dt><dd><span class={issued ? "tag ok" : bad ? "tag danger" : "tag warn"}>{life}</span></dd>
             <dt>Tickets</dt><dd>{items.map((i) => (

@@ -61,16 +61,26 @@ function fmtWhen(iso: string): string {
   return new Date(iso).toLocaleString("en-KE", { dateStyle: "full", timeStyle: "short" });
 }
 
+/** Placeholder-art initials. Skips boilerplate words (SAMPLE / EVENT / DEV …) so
+ *  demo events with the same prefix do not all show identical tiles. */
+const ART_STOP_WORDS = new Set(["sample", "event", "events", "dev", "seed", "demo", "the", "a", "an", "of", "and"]);
+
 function artCell(title: string, url: string | null) {
   if (url) return <img src={url} alt="" />;
-  const initials = title.split(/\s+/).filter((w) => w[0] && /[A-Za-z0-9]/.test(w[0])).slice(0, 2).map((w) => w[0]!.toUpperCase()).join("");
+  const words = title.split(/\s+/).map((w) => w.replace(/[^A-Za-z0-9]/g, ""));
+  const meaningful = words.filter((w) => w && !ART_STOP_WORDS.has(w.toLowerCase()));
+  const source = meaningful.length > 0 ? meaningful : words.filter(Boolean);
+  const initials = source.slice(0, 2).map((w) => w[0]!.toUpperCase()).join("");
   return <div class="initials">{initials || "MnM"}</div>;
 }
 
 export function publicRoutes(_config: AppConfig): Hono {
   const app = new Hono();
 
-  app.get("/", (c) => {
+  // The ticketing platform's own landing page. The site root is the MnM Juice
+  // Bar storefront (registered first in app.tsx), so the ticket homepage lives
+  // here at /tickets and is linked from /events.
+  app.get("/tickets", (c) => {
     const events = onSaleEvents();
     return c.html(
       <Page title="Buy event tickets">
@@ -109,7 +119,7 @@ export function publicRoutes(_config: AppConfig): Hono {
           <ol>
             <li>Choose your event and the number of tickets.</li>
             <li>Pay with M-Pesa — you receive a payment prompt on your phone.</li>
-            <li>Your unique QR ticket appears instantly and stays at <a href="/my-tickets">My Tickets</a>.</li>
+            <li>Your unique QR ticket appears instantly — keep the confirmation link we send you.</li>
             <li>Gate staff scan your QR — verification happens live online, every time.</li>
           </ol>
           <p class="hint">MnM is the authorised seller of tickets for listed events. The responsible seller, organiser and support contact are shown on every event page.</p>
@@ -121,7 +131,8 @@ export function publicRoutes(_config: AppConfig): Hono {
   app.get("/events", (c) => {
     const events = onSaleEvents();
     return c.html(
-      <Page title="Events" active="events">
+      <Page title="Events" active="/events">
+        <p class="muted small"><a href="/tickets">About MnM Tickets</a> &middot; <a href="/">Back to MnM Juice Bar</a></p>
         <h1>Events on sale</h1>
         {events.length === 0
           ? <div class="panel"><p class="muted">Nothing on sale at the moment. Try again soon or contact {"+254 705 687 273"}.</p></div>
@@ -172,6 +183,7 @@ export function publicRoutes(_config: AppConfig): Hono {
         {ev.description && <p>{ev.description}</p>}
         <hr class="divider" />
         <h2>Tickets</h2>
+        <p class="hint" style="margin-bottom:10px">Each purchase needs a name and phone number so we can reach you about the order and send your tickets.</p>
         {cats.map((cat) => {
           const avail = availableFor(cat.id);
           const orig = Number(cat.original_price);
@@ -183,9 +195,23 @@ export function publicRoutes(_config: AppConfig): Hono {
               <div class="price-line"><span>Ticket price (set by organiser)</span><span>{formatMinor(orig, LAUNCH_TERMS.currency)}</span></div>
               <div class="price-line"><span>MnM service commission</span><span>{formatMinor(mnm, LAUNCH_TERMS.currency)}</span></div>
               <div class="price-line"><span>Platform fee (Afrika Digitalis)</span><span>{formatMinor(ad, LAUNCH_TERMS.currency)}</span></div>
-              <div class="price-line"><span>You pay per ticket</span><span>{formatMinor(orig + mnm + ad, LAUNCH_TERMS.currency)}</span></div>
+              <div class="price-line total"><span>You pay per ticket</span><span>{formatMinor(orig + mnm + ad, LAUNCH_TERMS.currency)}</span></div>
               <form method="post" action="/checkout" style="margin-top:10px">
                 <input type="hidden" name="category_id" value={String(cat.id)} />
+                <div class="form-row">
+                  <div>
+                    <label for={`name-${cat.id}`}>Your name</label>
+                    <input id={`name-${cat.id}`} name="name" type="text" maxlength={80} required placeholder="e.g. Wanjiku Kamau" />
+                  </div>
+                  <div>
+                    <label for={`phone-${cat.id}`}>Phone (M-Pesa)</label>
+                    <input id={`phone-${cat.id}`} name="phone" type="tel" maxlength={20} required placeholder="07… or +2547…" pattern="(\+?254|0)[17]\d{8}" title="Kenyan mobile number, e.g. 0712345678" />
+                  </div>
+                  <div>
+                    <label for={`email-${cat.id}`}>Email (optional)</label>
+                    <input id={`email-${cat.id}`} name="email" type="email" maxlength={120} placeholder="you@example.com" />
+                  </div>
+                </div>
                 <div class="form-row">
                   <div>
                     <label for={`qty-${cat.id}`}>Quantity</label>
