@@ -19,3 +19,4 @@ c4*.out
 c4*.err
 cycle*.log
 data/_backup_*/
+backups/

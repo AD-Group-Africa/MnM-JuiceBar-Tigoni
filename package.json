@@ -17,7 +17,9 @@
     "seed:demo": "tsx db/seed-demo.ts",
     "images": "node scripts/generate-product-images.mjs",
     "setup": "npm run migrate && npm run seed && npm run images",
-    "migrate": "tsx src/db.ts --migrate"
+    "migrate": "tsx src/db.ts --migrate",
+    "db:backup": "node scripts/db-backup.mjs",
+    "db:restore": "node scripts/db-restore.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.9",

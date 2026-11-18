@@ -16,6 +16,8 @@ import {
   verifyPassword, type Capability, type SessionUser,
 } from "../auth.ts";
 import { newCsrfToken } from "../ids.ts";
+import { clientIp, consumeRateLimit } from "../ratelimit.ts";
+import { pseudonymiseIp, recordAudit } from "../audit.ts";
 import { Page } from "../views/layout.tsx";
 
 const loginAttempts = new Map<string, { n: number; resetAt: number }>();
@@ -95,7 +97,13 @@ export function authRoutes(config: AppConfig): Hono {
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) {
       return c.html(<Page title="Blocked"><div class="panel notice bad">Invalid request origin.</div></Page>, 403);
     }
-    const ip = c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+    const ip = clientIp(c);
+    // Per-phone throttling alone lets an attacker spray many phone numbers, so
+    // also cap all attempts from one IP.
+    if (!consumeRateLimit("staff-login-ip", ip, 50, LOGIN_WINDOW_MS).allowed) {
+      recordAudit({ action: "auth.rate_limited", entity: "staff", detail: { ip: pseudonymiseIp(ip) } });
+      return c.html(<Page title="Too many attempts"><div class="panel notice bad">Too many sign-in attempts from this network. Try again in a few minutes.</div></Page>, 429);
+    }
     const form = await c.req.parseBody();
     const phone = String(form.phone ?? "").trim();
     const password = String(form.password ?? "");
@@ -112,11 +120,13 @@ export function authRoutes(config: AppConfig): Hono {
     const ok = !!user && Number(user.is_active) === 1 && await verifyPassword(password, String(user.password_hash));
     if (!ok) {
       recordFail(ip, wanted);
+      recordAudit({ action: "auth.login_failed", entity: "staff", detail: { ip: pseudonymiseIp(ip) } });
       // Burn a constant amount of work to blunt timing/enum differences.
       await fixedHash("spare-work");
       return c.html(<Page title="Sign-in failed"><div class="narrow"><div class="panel notice bad">Wrong phone or password.</div></div></Page>, 401);
     }
     successClear(ip, wanted);
+    recordAudit({ action: "auth.login", entity: "staff", entityId: Number(user!.id), actorUser: Number(user!.id), detail: { ip: pseudonymiseIp(ip) } });
     const token = newSessionToken();
     createSession(Number(user!.id), ip, token);
     setSessionCookie(c, token, config);
@@ -133,6 +143,8 @@ export function authRoutes(config: AppConfig): Hono {
 
   app.post("/staff/logout", (c) => {
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) return c.text("", 403);
+    const current = getSessionUser(getCookie(c, SESSION_COOKIE));
+    if (current) recordAudit({ action: "auth.logout", entity: "staff", entityId: current.id, actorUser: current.id });
     destroySession(getCookie(c, SESSION_COOKIE));
     clearSessionCookie(c);
     return c.redirect("/");

@@ -14,6 +14,7 @@ import {
 import { formatMinor } from "../money.ts";
 import { queryOne } from "../db.ts";
 import { stateChangeOriginAllowed } from "../auth.ts";
+import { rateLimit } from "../ratelimit.ts";
 import { normalisePhoneKenya } from "../orders.ts";
 import { CUSTOMER_COOKIE, getCustomerBySession, linkJuiceOrderToCustomer } from "../customers.ts";
 import { Page } from "../views/layout.tsx";
@@ -833,7 +834,9 @@ export function juicePublicRoutes(config: AppConfig): Hono {
   });
 
   // ---------- POST CHECKOUT ----------
-  app.post("/juice/checkout", async (c) => {
+  // 60 orders / 10 min per client. High enough for a busy shared carrier-NAT
+  // address, low enough to stop automated order floods.
+  app.post("/juice/checkout", rateLimit({ name: "juice-checkout", limit: 60, windowMs: 10 * 60_000 }), async (c) => {
     // Same exact-origin rule as the ticket checkout and all staff mutations:
     // a juice order creates a customer record, so cross-site form posts are refused.
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) {
@@ -911,7 +914,8 @@ export function juicePublicRoutes(config: AppConfig): Hono {
 
   // A customer who loses the original link can re-open the order with the
   // reference and the phone number used at checkout. A fresh token is issued.
-  app.post("/juice/order/lookup", async (c) => {
+  // Order lookup is an enumeration target (reference + phone). Keep it tight.
+  app.post("/juice/order/lookup", rateLimit({ name: "juice-order-lookup", limit: 20, windowMs: 10 * 60_000 }), async (c) => {
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) {
       return c.html(<Page title="Blocked"><div class="panel notice bad">Cross-origin request blocked.</div></Page>, 403);
     }

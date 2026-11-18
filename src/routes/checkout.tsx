@@ -15,6 +15,7 @@ import { createOrder, LIFECYCLE, normalisePhoneKenya, issueGuestToken, checkGues
 import { getProvider, recordInitiating, completeInitiation, failInitiation, handleCallback } from "../payments/index.ts";
 import { formatMinor } from "../money.ts";
 import { signPayload, stateChangeOriginAllowed } from "../auth.ts";
+import { rateLimit } from "../ratelimit.ts";
 import { Page } from "../views/layout.tsx";
 import { CUSTOMER_COOKIE, getCustomerBySession, linkTicketOrderToCustomer } from "../customers.ts";
 
@@ -22,7 +23,9 @@ export function checkoutRoutes(config: AppConfig): Hono {
   const app = new Hono();
   const provider = getProvider(config);
 
-  app.post("/checkout", async (c) => {
+  // 30 attempts / 10 min per client: a real buyer places one or two orders; the
+  // limit stops scripted order spam and repeated 503 probes.
+  app.post("/checkout", rateLimit({ name: "ticket-checkout", limit: 30, windowMs: 10 * 60_000 }), async (c) => {
     // Use the shared allow-list (all configured origins, including development
     // loopback aliases) rather than silently comparing against only the first.
     const originOk = stateChangeOriginAllowed(c, config.publicOrigins);

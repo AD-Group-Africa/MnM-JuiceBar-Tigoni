@@ -174,3 +174,35 @@ and backed up. If a database already exists on the disk, point
 boot and are the intended upgrade path. Never start the service against a new
 empty path while an existing production database holds orders, tickets,
 customers or payments.
+
+## 9. Phase 3 addendum (18 November 2026)
+
+Section 4 was written as a recommendation. Render is still configured differently:
+
+| Setting | Live value | Section 4 recommendation |
+|---|---|---|
+| Build command | `npm install --include=dev && npm run migrate` | `npm ci && npm run build` |
+| Start command | `node --import tsx src/server.ts` | `npm start` |
+| Persistent disk | none (Free plan) | `/var/data` |
+| `DATABASE_FILE` | unset → `data/mnm-dev.sqlite` | `/var/data/mnm.sqlite` |
+
+The application now detects and reports this at boot and in `/health`. A relative
+or default path in production logs:
+
+```text
+[storage] WARNING: database storage is "ephemeral-risk" (…/data/mnm-dev.sqlite).
+  Existing records WILL be lost on the next deploy, restart or idle spin-down.
+```
+
+`GET /health` returns `storage.mode` (`ephemeral-risk`, `persistent-configured`,
+`unverified` or `development`) and `database` (`ok` / `error`, 503 when unreadable)
+without revealing the path. Set `DATABASE_REQUIRE_PERSISTENT=1` only after the disk
+is mounted, or the service will refuse to start.
+
+Backup and restore tooling and the full migration procedure are in
+`docs/PRODUCTION_PERSISTENCE_RUNBOOK.md`. Existing environment variables and
+secrets were not changed by this phase; payments remain `disabled`.
+
+**Still owner-blocked:** upgrading the instance to a plan that supports a disk,
+mounting it, and setting `DATABASE_FILE`. Persistence across a real Render restart
+cannot be verified before that, and must not be claimed.

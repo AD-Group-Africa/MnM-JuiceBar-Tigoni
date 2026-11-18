@@ -278,3 +278,28 @@ current data, because the shell is also unavailable on Free.
 
 The juice order `MNM-J-3687000001` was created by this verification and is safe
 to delete or ignore; it is demo-scale test data, not a customer order.
+
+## 12. Phase 3 — persistence, security and client readiness (18 November 2026)
+
+Phase 3 did not change the payment mode, the database path, the Render plan or any
+production secret. It added production safeguards, backup tooling, rate limiting,
+security headers, audit entries and commercial operating documentation.
+
+| Area | Change | Verification |
+|---|---|---|
+| Persistence guard | `src/persistence.ts`; boot classification, loud warning, optional `DATABASE_REQUIRE_PERSISTENT=1` refusal | `tests/persistence.test.ts`; boot log |
+| Health | `/health` now reports `database` and path-free `storage.mode`; 503 if the database is unreadable | `tests/security.test.ts`, `tests/payment-disabled.test.ts` |
+| Backup/restore | `npm run db:backup` (verified `VACUUM INTO` + manifest), `npm run db:restore` (verified, safety copy, `--yes`) | backup → restore round-trip test |
+| Graceful shutdown | WAL checkpoint + `closeDb()` on SIGINT/SIGTERM | code review; startup/shutdown log |
+| Rate limiting | Staff login (per phone + per IP), customer login/register, ticket checkout, juice checkout, order lookup | `tests/security.test.ts` (429 + Retry-After) |
+| Headers | `X-Frame-Options: DENY`, CSP `frame-ancestors 'none'` / `object-src 'none'` / `form-action 'self'`, `Permissions-Policy`, COOP | `tests/security.test.ts` |
+| Audit | Staff login/logout, rate-limit blocks, customer login recorded with pseudonymised IP | `src/audit.ts`; existing audit-log tests |
+| Commercial docs | `docs/commercial/09`–`15` plus `docs/PRODUCTION_PERSISTENCE_RUNBOOK.md` | documentation review |
+
+Current local verification on the Phase 3 tree: `npm test` **124/124 pass**,
+typecheck exit 0, build exit 0. `npm audit` and the live-service checks for this
+tree are recorded in `docs/PHASE_3_ACCEPTANCE_REPORT.md`.
+
+**Still blocked:** data persistence across a real Render restart (Free plan has no
+disk and no shell), scheduled off-host backups, and MFA. None of these is claimed
+as complete.

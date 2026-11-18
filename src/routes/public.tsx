@@ -4,7 +4,8 @@
  */
 import { Hono } from "hono";
 import type { AppConfig } from "../config.ts";
-import { queryAll, queryOne } from "../db.ts";
+import { checkDatabase, queryAll, queryOne } from "../db.ts";
+import { assessStorage, storageHealth } from "../persistence.ts";
 import { formatMinor, roundPoints } from "../money.ts";
 import { LAUNCH_TERMS } from "../money.ts";
 import { Page } from "../views/layout.tsx";
@@ -339,7 +340,23 @@ export function publicRoutes(config: AppConfig): Hono {
     );
   });
 
-  app.get("/health", (c) => c.json({ ok: true, service: "mnm-tickets", time: new Date().toISOString() }));
+  // Liveness + readiness. The storage mode is public and path-free: it tells an
+  // operator whether this instance is writing to a disk that survives a deploy.
+  let healthStorage: ReturnType<typeof assessStorage> | null = null;
+  app.get("/health", (c) => {
+    const db = checkDatabase();
+    healthStorage ??= assessStorage(config.databaseFile, { production: config.env === "production" });
+    return c.json(
+      {
+        ok: db.ok,
+        service: "mnm-tickets",
+        time: new Date().toISOString(),
+        database: db.ok ? "ok" : "error",
+        storage: storageHealth(healthStorage),
+      },
+      db.ok ? 200 : 503,
+    );
+  });
 
   return app;
 }

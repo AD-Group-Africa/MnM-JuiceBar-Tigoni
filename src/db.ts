@@ -57,6 +57,42 @@ export function migrate(databaseFile?: string): number {
   return count;
 }
 
+/** The file currently opened by this process (empty before getDb()). */
+export function databaseFilePath(): string {
+  return dbFile;
+}
+
+/**
+ * Checkpoint the WAL into the main file and close the handle. Used by graceful
+ * shutdown so a restart never depends on recovering a WAL left by SIGKILL, and
+ * by backup tooling so no committed transaction stays only in the sidecar.
+ */
+export function closeDb(): void {
+  if (!db) return;
+  try {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  } catch {
+    // A checkpoint failure must not prevent the handle from closing.
+  }
+  try {
+    db.close();
+  } catch {
+    // Already closed.
+  }
+  db = null;
+  dbFile = "";
+}
+
+/** Readiness probe used by /health: can this process read the database? */
+export function checkDatabase(): { ok: boolean; detail?: string } {
+  try {
+    getDb().prepare("SELECT 1 AS ok").get();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, detail: (err as Error).message };
+  }
+}
+
 export interface Row { [key: string]: unknown }
 
 export function queryAll(sql: string, params: (string | number | null)[] = []): Row[] {

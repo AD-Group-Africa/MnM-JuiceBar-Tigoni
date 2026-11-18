@@ -192,4 +192,78 @@ If a deployment causes issues:
 
 ---
 
+## Render configuration (actual, 18 November 2026)
+
+The live service does **not** match the recommended commands above. The table
+records the drift so it is not mistaken for documentation error:
+
+| Setting | Live value | This document recommends |
+|---|---|---|
+| Build command | `npm install --include=dev && npm run migrate` | `npm ci --include=dev && npm run build` |
+| Start command | `node --import tsx src/server.ts` | `npm start` (runs `node dist/server.js`) |
+| Health check path | `/health` | `/health` (matches) |
+| Persistent disk | **none** (Free plan) | `/var/data` mounted, `DATABASE_FILE=/var/data/mnm.sqlite` |
+| `DATABASE_FILE` | unset → `data/mnm-dev.sqlite` | `/var/data/mnm.sqlite` |
+
+Consequences of the live configuration:
+
+- `tsx` runs TypeScript directly, so the compiled `dist/` output is not what
+  serves traffic and the build step is not a deploy gate.
+- `npm install` (not `npm ci`) may resolve slightly different patch versions than
+  the lockfile pins.
+- Migrations run twice (build step and boot). That is idempotent but redundant.
+- Without a disk, the SQLite file is recreated on every deploy/restart. See
+  `docs/PRODUCTION_PERSISTENCE_RUNBOOK.md`.
+
+Changing these is a Render dashboard action (owner/operator). Moving to
+`npm ci --include=dev && npm run build` + `npm start` makes the deploy fail on a
+TypeScript error instead of at runtime; do it together with the disk migration so
+both changes are verified in one deploy.
+
+## Database persistence and backups
+
+`DATABASE_FILE` is the only database setting. Production should be:
+
+```text
+DATABASE_FILE=/var/data/mnm.sqlite
+DATABASE_PERSISTENT_ROOT=/var/data
+```
+
+At boot the app classifies the location and either confirms persistence, warns
+that data will be lost, or (with `DATABASE_REQUIRE_PERSISTENT=1`) refuses to start.
+`GET /health` reports the same mode without exposing the path:
+
+```json
+{"ok":true,"database":"ok","storage":{"mode":"persistent-configured","persistent":true}}
+```
+
+Backup and restore:
+
+```bash
+npm run db:backup                                  # verified VACUUM INTO snapshot
+npm run db:restore -- --backup <file> --yes        # stop the service first
+```
+
+The backup command refuses to overwrite an existing file and verifies
+`integrity_check` plus row counts. Full procedure, data-loss matrix and rollback:
+`docs/PRODUCTION_PERSISTENCE_RUNBOOK.md`.
+
+## Security controls in the request path
+
+| Control | Implementation |
+|---|---|
+| Password storage | scrypt, per-user salt, constant-time verify |
+| Sessions | Server-side token hash, 12h TTL, `HttpOnly`, `SameSite=Lax`, `Secure` in production |
+| CSRF | Exact Origin/Referer allowlist (`PUBLIC_ORIGINS`) on every state-changing request |
+| Rate limiting | Login (per phone and per IP), customer login/register, ticket checkout, juice checkout, order lookup |
+| Security headers | `X-Frame-Options: DENY`, CSP with `frame-ancestors 'none'` / `object-src 'none'` / `form-action 'self'`, `nosniff`, `Referrer-Policy`, `Permissions-Policy`, HSTS in production |
+| Authorisation | Server-side role/capability checks on every staff operation |
+| Audit | `audit_log` for staff login/logout, rate-limit blocks, refunds, event cancellation, scans |
+| Fail-closed payments | `PAYMENT_PROVIDER=disabled` returns 503 before creating an order; Daraja callbacks verify the transaction with the provider |
+
+Limits are in-memory and therefore per process; a multi-instance deployment needs
+shared counters. There is no MFA (see `docs/commercial/12_STAFF_OPERATIONS.md`).
+
+---
+
 *For any production deployment, qualified legal, tax, and data-protection advisers should review the platform against Kenyan regulations (Data Protection Act 2019, consumer protection, and ticketing obligations). This platform records transactions and commissions but does not claim automated legal compliance.*

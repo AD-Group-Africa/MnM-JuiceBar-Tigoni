@@ -33,10 +33,21 @@ export function createApp(config: AppConfig): Hono {
     await next();
     c.header("X-Content-Type-Options", "nosniff");
     c.header("Referrer-Policy", "same-origin");
+    // No page on this site is designed to be framed; deny embedding outright
+    // so clickjacking cannot overlay a checkout or staff action.
+    c.header("X-Frame-Options", "DENY");
+    c.header("Cross-Origin-Opener-Policy", "same-origin");
+    // Camera is allowed to this origin only: the gate scanner may read a QR code
+    // from the device camera. Everything else is refused.
+    c.header("Permissions-Policy", "camera=(self), microphone=(), geolocation=(), payment=(), usb=()");
     if (config.env === "production") {
       c.header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
     }
-    c.header("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'");
+    c.header(
+      "Content-Security-Policy",
+      "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; " +
+        "img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+    );
     // Development only: stylesheets, the inline cart script and the sample
     // illustrations are edited constantly, and a stale browser cache silently
     // shows an old design. Development responses are never cached.

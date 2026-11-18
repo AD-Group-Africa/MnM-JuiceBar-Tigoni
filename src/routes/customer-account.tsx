@@ -20,6 +20,8 @@ import { Page } from "../views/layout.tsx";
 import { queryOne } from "../db.ts";
 import { issueJuiceOrderToken } from "../juice.ts";
 import { issueGuestToken } from "../orders.ts";
+import { rateLimit } from "../ratelimit.ts";
+import { recordAudit } from "../audit.ts";
 
 export function customerAccountRoutes(config: AppConfig): Hono {
   const app = new Hono();
@@ -123,7 +125,7 @@ export function customerAccountRoutes(config: AppConfig): Hono {
     );
   });
 
-  app.post("/account/login", async (c) => {
+  app.post("/account/login", rateLimit({ name: "customer-login", limit: 10, windowMs: 10 * 60_000 }), async (c) => {
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) return c.text("Forbidden", 403);
     const b = await c.req.parseBody();
     const customer = await authenticateCustomer(String(b.phone ?? ""), String(b.password ?? ""));
@@ -145,6 +147,7 @@ export function customerAccountRoutes(config: AppConfig): Hono {
     }
     const token = createCustomerSession(customer.id, c.req.header("x-forwarded-for") ?? "");
     setCustomerCookie(c, token, config);
+    recordAudit({ action: "customer.login", entity: "customers", entityId: customer.id });
     return c.redirect("/account");
   });
 
@@ -166,7 +169,7 @@ export function customerAccountRoutes(config: AppConfig): Hono {
     );
   });
 
-  app.post("/account/register", async (c) => {
+  app.post("/account/register", rateLimit({ name: "customer-register", limit: 10, windowMs: 60 * 60_000 }), async (c) => {
     if (!stateChangeOriginAllowed(c, config.publicOrigins)) return c.text("Forbidden", 403);
     const b = await c.req.parseBody();
     const result = await registerCustomer({
