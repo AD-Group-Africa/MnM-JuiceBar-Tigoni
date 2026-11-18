@@ -166,7 +166,52 @@ launch-hardening items, not regressions.
 | Historical run records (may quote superseded counts) | `MNM_PHASE_*`, `MNM_P0_*`, `MNM_P1_*`, `MNM_PHASE_2A*`, `MNM_COMPLETION_*`, `MNM_TECHNICAL_AUDIT.md`, `MNM_EXECUTIVE_STATUS_REPORT.md` |
 | Demo/owner communication drafts | `OWNER-*`, `MNM_OWNER_*`, `DEMO-VERIFICATION.md`, `OWNER-PRESENTATION.html` |
 
-## 9. Remaining owner actions
+## 9. Live service observation (18 November 2026, 09:52 UTC)
+
+Service URL: `https://mnm-juicebar-tigoni.onrender.com` (discovered by direct
+probe; it is not recorded anywhere in the repository).
+
+| Probe | Result |
+|---|---|
+| `GET /health` | 200, `{"ok":true,"service":"mnm-tickets",...}`, `x-render-origin-server: Render` |
+| `GET /juice-health` | 200, `productCount: 14` |
+| `GET /`, `/menu`, `/events`, `/cart`, `/about`, `/catering`, `/contact`, `/tickets`, `/staff/login` | 200 (`/juice` → 301) |
+| `GET /menu/fj-001.svg` | **640×480** artwork (1670 bytes) |
+| `GET /events/<slug>` | 404 — the production database has no events |
+| `POST /checkout` | **400 "Order failed"**, not 503 |
+| `GET /events` | 200, no disabled notice, no checkout form (no events exist) |
+
+Interpretation:
+
+1. **The running release predates commit `9019f03`.** The committed artwork is
+   800×800; the live file is the 640×480 original. Render is serving the last
+   successful deploy, not `b869826`.
+2. **The running release is not in disabled mode.** The disabled branch in
+   `src/routes/checkout.tsx` returns 503 before parsing the form or calling
+   `createOrder()`; the live service instead reached order creation and failed
+   validation (400). That is consistent with `PAYMENT_PROVIDER=dev`.
+3. **The production database holds data.** 14 products with live prices are
+   served, and `/events` renders with zero events. Nothing here may be reset or
+   repointed.
+
+Reproduced locally with `NODE_ENV=production PAYMENT_PROVIDER=dev`, which is the
+Render startup failure:
+
+```text
+Error: [config] PAYMENT_PROVIDER=dev is not allowed in production.
+Use 'disabled' without live payments or 'daraja' with live credentials.
+    at loadConfig (dist/config.js)
+```
+
+The repository contains no `render.yaml`, blueprint or environment-group
+reference, so the value is set in the Render service environment (or a linked
+group) and must be changed there.
+
+**Not verified for the live service:** deployed commit SHA, deployment logs,
+disk mount, `DATABASE_FILE`, and restart persistence. The Render dashboard is
+signed out in the available browser session and no API key is present.
+
+## 10. Remaining owner actions
 
 1. Provide the Render service URL, or a read-only account/API key, so the
    deployment, disk mount, `DATABASE_FILE` and logs can be verified.
