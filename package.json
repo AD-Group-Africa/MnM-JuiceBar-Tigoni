@@ -20,8 +20,8 @@
     "migrate": "tsx src/db.ts --migrate"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.5",
-    "hono": "^4.9.0"
+    "@hono/node-server": "^2.1.9",
+    "hono": "^4.13.19"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
