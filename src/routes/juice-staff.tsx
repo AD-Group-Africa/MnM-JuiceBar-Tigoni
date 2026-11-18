@@ -88,41 +88,53 @@ export function juiceStaffRoutes(config: AppConfig): Hono {
     return c.html(
       <StaffPage title="Juice Bar — Dashboard" >
 
-        <h1>Juice Bar dashboard</h1>
-        <p class="muted">Signed in as <strong>{u.fullName}</strong> ({u.role}).</p>
+        <div class="page-head ops-head">
+          <p class="kicker">Juice bar · live service</p>
+          <h1>Today at the counter.</h1>
+          <p class="lead">Signed in as <strong>{u.fullName}</strong> ({u.role}). Counts refresh each time this page loads.</p>
+        </div>
 
-        <div class="stat-grid">
-          <div class="stat"><div class="v">{newCount}</div><div class="k">new orders</div></div>
-          <div class="stat"><div class="v">{preparingCount}</div><div class="k">being prepared</div></div>
-          <div class="stat"><div class="v">{readyCount}</div><div class="k">ready</div></div>
-          <div class="stat"><div class="v">{outCount}</div><div class="k">out for delivery</div></div>
-          <div class="stat"><div class="v">{deliveredToday}</div><div class="k">delivered today</div></div>
-          <div class="stat"><div class="v">{totalToday}</div><div class="k">orders today</div></div>
-          <div class="stat"><div class="v">{formatMinor(todayRevenue, "KES")}</div><div class="k">revenue today</div></div>
+        <div class="ops-kpis">
+          <div class="ops-kpi is-hot">
+            <span class="k">New orders</span>
+            <span class="v">{newCount}</span>
+            <span class="meta">{preparingCount} preparing · {readyCount} ready</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">Out for delivery</span>
+            <span class="v">{outCount}</span>
+            <span class="meta">{deliveredToday} delivered today</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">Revenue today</span>
+            <span class="v">{formatMinor(todayRevenue, "KES")}</span>
+            <span class="meta">{totalToday} order{totalToday === 1 ? "" : "s"} today</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">Last 7 days</span>
+            <span class="v">{formatMinor(summary.weekRevenueMinor, "KES")}</span>
+            <span class="meta">{summary.weekOrders} order{summary.weekOrders === 1 ? "" : "s"} · {formatMinor(summary.avgOrderMinor, "KES")} average</span>
+          </div>
         </div>
 
         <div class="actions-row">
-          <a class="btn btn-primary" href="/staff/juice/orders">View all orders</a>
-          <a class="btn btn-secondary" href="/staff/juice/products">Manage products</a>
-          <a class="btn btn-secondary" href="/staff/juice/delivery">Delivery zones</a>
-          <a class="btn btn-secondary" href="/staff/juice/catering">Catering enquiries</a>
-          <a class="btn btn-secondary" href="/staff/juice/reviews">Reviews</a>
-          <a class="btn btn-ghost" href="/staff/juice/settings">Settings</a>
-        </div>
-
-        {/* SALES SUMMARY */}
-        <h2>Sales summary</h2>
-        <div class="stat-grid">
-          <div class="stat"><div class="v">{formatMinor(summary.weekRevenueMinor, "KES")}</div><div class="k">revenue · last 7 days</div></div>
-          <div class="stat"><div class="v">{summary.weekOrders}</div><div class="k">orders · last 7 days</div></div>
-          <div class="stat"><div class="v">{formatMinor(summary.avgOrderMinor, "KES")}</div><div class="k">average order value</div></div>
-          <div class="stat"><div class="v">{summary.unitsSold}</div><div class="k">drinks/snacks sold · 7d</div></div>
-          <div class="stat"><div class="v">{summary.deliverySharePct}%</div><div class="k">delivery share · 7d</div></div>
-          <div class="stat"><div class="v">{summary.openCatering}</div><div class="k">open catering enquiries</div></div>
+          <a class="btn btn-primary btn-sm" href="/staff/juice/orders">View all orders</a>
+          <a class="btn btn-ghost btn-sm" href="/staff/juice/products">Manage products</a>
+          <a class="btn btn-ghost btn-sm" href="/staff/juice/delivery">Delivery zones</a>
+          <a class="btn btn-ghost btn-sm" href="/staff/juice/catering">Catering enquiries</a>
+          <a class="btn btn-ghost btn-sm" href="/staff/juice/reviews">Reviews</a>
+          <a class="btn btn-ghost btn-sm" href="/staff/juice/settings">Settings</a>
         </div>
 
         <div class="panel">
-          <h3>Best sellers · last 7 days</h3>
+          <div class="panel-head-row">
+            <div>
+              <p class="kicker">Last 7 days</p>
+              <h3>What's selling</h3>
+            </div>
+            <p class="muted small">{summary.unitsSold} items sold · {summary.deliverySharePct}% delivery · {summary.openCatering} open catering {summary.openCatering === 1 ? "enquiry" : "enquiries"}</p>
+          </div>
+          <h4 class="mini-heading">Best sellers</h4>
           {summary.topProducts.length === 0 ? (
             <p class="muted">No sales recorded in the last 7 days yet.</p>
           ) : (

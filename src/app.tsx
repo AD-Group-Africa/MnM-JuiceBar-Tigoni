@@ -10,8 +10,10 @@ import { verifyScanRoutes, scanRoutes } from "./routes/verify-scan.tsx";
 import { staffAreaRoutes } from "./routes/staff-area.tsx";
 import { juiceStaffRoutes } from "./routes/juice-staff.tsx";
 import { adminRoutes } from "./routes/admin.tsx";
+import { customerAccountRoutes } from "./routes/customer-account.tsx";
 import { parseDarajaNotify } from "./payments/notify.ts";
 import { handleCallback } from "./payments/index.ts";
+import { DarajaProvider } from "./payments/daraja.ts";
 
 /**
  * Application assembly (no listener) — reused by the production server and by
@@ -45,6 +47,7 @@ export function createApp(config: AppConfig): Hono {
   // storefront is the primary business, so "/" must resolve to the MnM Juice
   // Bar homepage — the ticketing platform lives under /events and /tickets.
   app.route("/", juicePublicRoutes(config));
+  app.route("/", customerAccountRoutes(config));
   app.route("/", publicRoutes(config));
   app.route("/", authRoutes(config));
   app.route("/", checkoutRoutes(config));
@@ -56,10 +59,34 @@ export function createApp(config: AppConfig): Hono {
   app.route("/", juiceStaffRoutes(config));
 
   app.post("/pay/notify/daraja", async (c) => {
+    // The simulator must never expose a public callback endpoint. Its callback
+    // is invoked in-process and labelled; Daraja is the only network callback.
+    if (config.paymentProvider !== "daraja") {
+      return c.json({ ResultCode: 1, ResultDesc: "not found" }, 404);
+    }
     const raw = await c.req.text();
     const parsed = parseDarajaNotify(raw);
     if (!parsed) return c.json({ ResultCode: 1, ResultDesc: "bad payload" }, 400);
-    const res = handleCallback({ provider: "daraja", raw, ...parsed });
+
+    // Daraja callbacks are not cryptographically signed. Never settle from the
+    // callback body alone: query the official STK status endpoint and require
+    // that the CheckoutRequestID is known and completed successfully.
+    const provider = new DarajaProvider(config);
+    const verification = await provider.verifyTransaction(parsed.providerRequestId);
+    if (!verification.reachable) {
+      console.warn("[payments] callback verification unavailable; leaving payment pending", verification.detail);
+      return c.json({ ResultCode: 1, ResultDesc: "verification unavailable" }, 503);
+    }
+    if (parsed.outcome === "succeeded" && !verification.paid) {
+      console.warn("[payments] success callback contradicted by provider query", verification.detail);
+      return c.json({ ResultCode: 1, ResultDesc: "transaction not confirmed" }, 502);
+    }
+    if (parsed.outcome === "failed" && verification.paid) {
+      console.warn("[payments] failure callback contradicted by provider query", verification.detail);
+      return c.json({ ResultCode: 1, ResultDesc: "transaction state conflict" }, 409);
+    }
+
+    const res = handleCallback({ provider: "daraja", raw, ...parsed, verified: true });
     if (!res.ok) return c.json({ ResultCode: 1, ResultDesc: res.detail }, res.httpStatus as ContentfulStatusCode);
     return c.json({ ResultCode: 0, ResultDesc: res.detail });
   });

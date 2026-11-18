@@ -15,7 +15,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mnm-test-"));
 process.env.DATABASE_FILE = path.join(tmp, "test.sqlite");
 
 const { migrate, run, queryOne, queryAll, getDb } = await import("../src/db.ts");
-const { createOrder, settleOrderPaid, issueTicketsOnce, expireReservations, LIFECYCLE, issueGuestToken, checkGuestAccess, startRefund, completeRefund } = await import("../src/orders.ts");
+const { createOrder, settleOrderPaid, issueTicketsOnce, expireReservations, LIFECYCLE, issueGuestToken, checkGuestAccess, startRefund, completeRefund, cancelEventAndQueueRefunds, paidIssuedForCategory, syncSoldCount, reconcileSoldCounts } = await import("../src/orders.ts");
 const { priceSplit } = await import("../src/money.ts");
 const paymentMod = await import("../src/payments/index.ts");
 const { handleCallback, recordInitiated } = paymentMod;
@@ -157,6 +157,62 @@ test("refund lifecycle voids tickets", () => {
   completeRefund(String(queryOne("SELECT order_ref FROM orders WHERE id=?", [oid])!.order_ref), 1);
 });
 
+test("sale window rejects checkout before opening and after closing", () => {
+  function eventWindow(startOffsetMs: number, endOffsetMs: number): number {
+    const now = Date.now();
+    const ev = run(
+      `INSERT INTO events(slug,title,venue_name,venue_area,starts_at,organizer_name,organizer_contact,
+                          authorization_ref,authorized_by_user,authorized_at,sale_starts_at,sale_ends_at,status,created_by)
+       VALUES (?,?,'Hall','Limuru',datetime('now','+30 days'),'Org','+254700000000','AUTH',1,datetime('now'),?,?, 'on_sale',1)`,
+      [`window-${now}-${startOffsetMs}`, `Window ${startOffsetMs}`, new Date(now + startOffsetMs).toISOString(), new Date(now + endOffsetMs).toISOString()],
+    );
+    return Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+      [Number(ev.lastInsertRowid), "Window Tier", 100_000, 10]).lastInsertRowid);
+  }
+
+  const future = createOrder({ categoryId: eventWindow(60 * 60_000, 2 * 60 * 60_000), qty: 1, customerName: "Early", customerPhone: "0712345678" });
+  assert.equal(future.ok, false);
+  assert.equal(future.code, "sale_not_open");
+
+  const past = createOrder({ categoryId: eventWindow(-2 * 60 * 60_000, -60 * 60_000), qty: 1, customerName: "Late", customerPhone: "0712345678" });
+  assert.equal(past.ok, false);
+  assert.equal(past.code, "sale_closed");
+});
+
+test("event cancellation voids tickets, releases holds and queues refunds for staff completion", () => {
+  const ev = run(
+    `INSERT INTO events(slug,title,venue_name,venue_area,starts_at,organizer_name,organizer_contact,
+                        authorization_ref,authorized_by_user,authorized_at,sale_starts_at,sale_ends_at,status,created_by)
+     VALUES (?,?,'Hall','Limuru',datetime('now','+30 days'),'Org','+254700000000','AUTH',1,datetime('now'),datetime('now','-1 day'),datetime('now','+1 day'),'on_sale',1)`,
+    [`cancel-${Date.now()}`, "Cancel Event"],
+  );
+  const eventId = Number(ev.lastInsertRowid);
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [eventId, "Cancel Tier", 100_000, 10]).lastInsertRowid);
+
+  const paid = createOrder({ categoryId: cid, qty: 2, customerName: "Paid", customerPhone: "0712345678" });
+  assert.equal(paid.ok, true);
+  payOrder(paid.orderId!);
+  const pending = createOrder({ categoryId: cid, qty: 1, customerName: "Pending", customerPhone: "0712345678" });
+  assert.equal(pending.ok, true);
+
+  const result = cancelEventAndQueueRefunds(eventId, 1);
+  assert.equal(result.ok, true);
+  assert.equal(result.refundPending, 1);
+  assert.equal(result.pendingCancelled, 1);
+  assert.equal(result.ticketsVoided, 2);
+  assert.equal(String(queryOne("SELECT status FROM events WHERE id=?", [eventId])!.status), "cancelled");
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [paid.orderId!])!.lifecycle), LIFECYCLE.REFUND_PENDING);
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [pending.orderId!])!.lifecycle), LIFECYCLE.CANCELLED);
+  assert.equal(Number(queryOne("SELECT COUNT(*) n FROM tickets WHERE order_id=? AND status='cancelled'", [paid.orderId!])!.n), 2);
+  assert.equal(Number(queryOne("SELECT COUNT(*) n FROM reservations WHERE order_id=? AND status='active'", [pending.orderId!])!.n), 0);
+
+  const ref = String(queryOne("SELECT order_ref FROM orders WHERE id=?", [paid.orderId!])!.order_ref);
+  assert.equal(completeRefund(ref, 1), true);
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [paid.orderId!])!.lifecycle), LIFECYCLE.REFUNDED);
+  assert.equal(Number(queryOne("SELECT COUNT(*) n FROM tickets WHERE order_id=? AND status='refunded'", [paid.orderId!])!.n), 2);
+});
+
 test("guest token grants access and other tokens fail", () => {
   const oid = Number(queryOne("SELECT id FROM orders WHERE order_ref LIKE 'MNM-%' LIMIT 1")!.id);
   const tok = issueGuestToken(oid);
@@ -164,4 +220,129 @@ test("guest token grants access and other tokens fail", () => {
   assert.equal(checkGuestAccess(ref, tok), true);
   assert.equal(checkGuestAccess(ref, tok + "x"), false);
   assert.equal(checkGuestAccess(ref, ""), false);
+});
+
+function payOrder(orderId: number, provider = "dev", merchantRequestId?: string): void {
+  const order = queryOne("SELECT total_minor, currency FROM orders WHERE id=?", [orderId])!;
+  const prid = `PAY-${provider}-${orderId}-${Math.random().toString(36).slice(2)}`;
+  recordInitiated(orderId, provider, prid, Number(order.total_minor), String(order.currency), "+254712345678", merchantRequestId);
+  const out = handleCallback({
+    provider,
+    providerRequestId: prid,
+    outcome: "succeeded",
+    amountMinor: Number(order.total_minor),
+    currency: String(order.currency),
+    merchantRequestId,
+    verified: provider === "daraja" ? true : undefined,
+  });
+  assert.equal(out.ok, true, out.detail);
+}
+
+test("paid capacity is enforced and sold_count reconciles to issued tickets", () => {
+  const ev = queryOne("SELECT id FROM events WHERE slug='ev-test'")!;
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [Number(ev.id), "Capacity Two", 100_000, 2]).lastInsertRowid);
+  const first = createOrder({ categoryId: cid, qty: 2, customerName: "Cap A", customerPhone: "0712345678" });
+  assert.equal(first.ok, true);
+  payOrder(first.orderId!);
+
+  const cat = queryOne("SELECT quantity, sold_count FROM ticket_categories WHERE id=?", [cid])!;
+  assert.equal(Number(cat.sold_count), 2, "counter must reflect both issued tickets");
+  assert.equal(paidIssuedForCategory(cid), 2, "derived issued count must be authoritative");
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [first.orderId!]).length, 2);
+
+  const second = createOrder({ categoryId: cid, qty: 1, customerName: "Cap B", customerPhone: "0712345678" });
+  assert.equal(second.ok, false);
+  assert.equal(second.code, "sold_out");
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [first.orderId!]).length, 2, "no extra tickets on refusal");
+});
+
+test("concurrent paid orders cannot oversell capacity", () => {
+  const ev = queryOne("SELECT id FROM events WHERE slug='ev-test'")!;
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [Number(ev.id), "Concurrent Paid", 100_000, 2]).lastInsertRowid);
+  const a = createOrder({ categoryId: cid, qty: 1, customerName: "Con A", customerPhone: "0712345678" });
+  const b = createOrder({ categoryId: cid, qty: 1, customerName: "Con B", customerPhone: "0712345678" });
+  assert.equal(a.ok, true);
+  assert.equal(b.ok, true);
+
+  // Settlement is synchronous and transactional in this stack; interleave the
+  // two callbacks to prove the second cannot issue against released capacity.
+  payOrder(a.orderId!);
+  payOrder(b.orderId!);
+  assert.equal(paidIssuedForCategory(cid), 2);
+  const c = createOrder({ categoryId: cid, qty: 1, customerName: "Con C", customerPhone: "0712345678" });
+  assert.equal(c.ok, false);
+  assert.equal(c.code, "sold_out");
+});
+
+test("refunds release inventory and reconcile sold_count", () => {
+  const ev = queryOne("SELECT id FROM events WHERE slug='ev-test'")!;
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [Number(ev.id), "Refund Release", 100_000, 2]).lastInsertRowid);
+  const res = createOrder({ categoryId: cid, qty: 1, customerName: "Refund R", customerPhone: "0712345678" });
+  assert.equal(res.ok, true);
+  payOrder(res.orderId!);
+  assert.equal(paidIssuedForCategory(cid), 1);
+  assert.equal(syncSoldCount(cid), 1);
+
+  const ref = String(queryOne("SELECT order_ref FROM orders WHERE id=?", [res.orderId!])!.order_ref);
+  assert.equal(startRefund(ref, 1), true);
+  assert.equal(paidIssuedForCategory(cid), 0, "refunded tickets no longer occupy capacity");
+  assert.equal(Number(queryOne("SELECT sold_count FROM ticket_categories WHERE id=?", [cid])!.sold_count), 0);
+
+  const replacement = createOrder({ categoryId: cid, qty: 1, customerName: "Refund S", customerPhone: "0712345678" });
+  assert.equal(replacement.ok, true, "released capacity must be sellable again");
+});
+
+test("startup reconciliation repairs stale sold_count without changing tickets", () => {
+  const ev = queryOne("SELECT id FROM events WHERE slug='ev-test'")!;
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [Number(ev.id), "Reconcile Me", 100_000, 2]).lastInsertRowid);
+  const res = createOrder({ categoryId: cid, qty: 1, customerName: "Reconcile R", customerPhone: "0712345678" });
+  assert.equal(res.ok, true);
+  payOrder(res.orderId!);
+  run("UPDATE ticket_categories SET sold_count=0 WHERE id=?", [cid]);
+  assert.equal(Number(queryOne("SELECT sold_count FROM ticket_categories WHERE id=?", [cid])!.sold_count), 0);
+  const result = reconcileSoldCounts();
+  assert.ok(result.updated >= 1);
+  assert.equal(result.failed, 0);
+  assert.equal(Number(queryOne("SELECT sold_count FROM ticket_categories WHERE id=?", [cid])!.sold_count), 1);
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [res.orderId!]).length, 1);
+});
+
+test("daraja callbacks require verification and matching merchant reference", () => {
+  const ev = queryOne("SELECT id FROM events WHERE slug='ev-test'")!;
+  const cid = Number(run("INSERT INTO ticket_categories(event_id,name,original_price,quantity) VALUES (?,?,?,?)",
+    [Number(ev.id), "Daraja Verify", 100_000, 2]).lastInsertRowid);
+  const res = createOrder({ categoryId: cid, qty: 1, customerName: "Daraja D", customerPhone: "0712345678" });
+  assert.equal(res.ok, true);
+  const order = queryOne("SELECT total_minor, currency FROM orders WHERE id=?", [res.orderId!])!;
+  const prid = `DARAJA-${res.orderId}`;
+  recordInitiated(res.orderId!, "daraja", prid, Number(order.total_minor), String(order.currency), "+254712345678", "MERCHANT-1");
+
+  const unverified = handleCallback({
+    provider: "daraja", providerRequestId: prid, outcome: "succeeded",
+    amountMinor: Number(order.total_minor), currency: String(order.currency), merchantRequestId: "MERCHANT-1",
+  });
+  assert.equal(unverified.ok, false);
+  assert.equal(unverified.httpStatus, 401);
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [res.orderId!])!.lifecycle), LIFECYCLE.PENDING_PAYMENT);
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [res.orderId!]).length, 0);
+
+  const mismatch = handleCallback({
+    provider: "daraja", providerRequestId: prid, outcome: "succeeded", verified: true,
+    amountMinor: Number(order.total_minor), currency: String(order.currency), merchantRequestId: "MERCHANT-OTHER",
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.httpStatus, 409);
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [res.orderId!]).length, 0);
+
+  const verified = handleCallback({
+    provider: "daraja", providerRequestId: prid, outcome: "succeeded", verified: true,
+    amountMinor: Number(order.total_minor), currency: String(order.currency), merchantRequestId: "MERCHANT-1",
+  });
+  assert.equal(verified.ok, true, verified.detail);
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [res.orderId!])!.lifecycle), LIFECYCLE.TICKET_ISSUED);
+  assert.equal(queryAll("SELECT id FROM tickets WHERE order_id=?", [res.orderId!]).length, 1);
 });

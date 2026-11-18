@@ -1,0 +1,10 @@
+User-agent: *
+Allow: /
+Disallow: /staff
+Disallow: /admin
+Disallow: /pay
+Disallow: /order
+Disallow: /juice/order
+Disallow: /api
+
+# Add the production sitemap URL here once the owner confirms the domain.

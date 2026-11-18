@@ -3,15 +3,22 @@
  */
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { getCookie } from "hono/cookie";
 import type { AppConfig } from "../config.ts";
 import {
   allCategories, featuredProducts, bestsellerProducts, allProducts, productById,
   productsInCategory, approvedReviewsForProduct, averageRating, juiceOrderByRef, searchProducts, cartSubtotal, computeJuiceOrderTotals, enabledDeliveryZones,
   createJuiceOrder, businessSetting, createCateringEnquiry, CATERING_EVENT_TYPES,
+  issueJuiceOrderToken, checkJuiceOrderAccess,
 } from "../juice.ts";
 import { formatMinor } from "../money.ts";
+import { queryOne } from "../db.ts";
 import { stateChangeOriginAllowed } from "../auth.ts";
+import { normalisePhoneKenya } from "../orders.ts";
+import { CUSTOMER_COOKIE, getCustomerBySession, linkJuiceOrderToCustomer } from "../customers.ts";
 import { Page } from "../views/layout.tsx";
+
+const HOME_MARQUEE = ["Fresh fruit", "No concentrates", "Pressed to order", "Tigoni, Limuru", "Pickup & delivery", "MnM Tickets"];
 
 export function juicePublicRoutes(config: AppConfig): Hono {
   const app = new Hono();
@@ -22,180 +29,184 @@ export function juicePublicRoutes(config: AppConfig): Hono {
   // ---------- HOME ----------
   app.get("/", (c) => {
     const categories = allCategories();
-    const featured = featuredProducts(8);
-    const bestsellers = bestsellerProducts(6);
-    const heroHeadline = businessSetting("hero_headline");
-    const heroSubhead = businessSetting("hero_subhead");
-    const heroCta = businessSetting("hero_cta");
-    const heroImageUrl = businessSetting("hero_image_url");
-    const galleryHeading = businessSetting("gallery_heading") || "What we do";
-    const galleryItemsRaw = businessSetting("gallery_items") || "[]";
-    let galleryItems: Array<{ imageUrl?: string; altText?: string; title?: string; categoryName?: string; initials?: string; caption?: string }> = [];
-    try { galleryItems = JSON.parse(galleryItemsRaw); } catch { galleryItems = []; }
+    const featured = featuredProducts(6);
+    const heroHeadline = businessSetting("hero_headline") || "Tigoni's fresh juice bar. Handmade daily.";
+    const heroSubhead = businessSetting("hero_subhead") || "Fresh juices, smoothies, fruit blends and snacks — pressed fresh at M&M Juice Bar Tigoni.";
     const address = businessSetting("address_line");
     const phone = businessSetting("contact_phone");
     const hours = businessSetting("opening_hours");
     const aboutBlurb = businessSetting("about_html");
-    const socialInstagram = businessSetting("instagram_url");
-    const socialFacebook = businessSetting("facebook_url");
     const productCount = allProducts({ available: true }).length;
+
+    // Split the owner-editable headline at its first full stop so the second
+    // sentence can carry the italic brand accent without hard-coding copy.
+    const split = heroHeadline.match(/^(.+?\.)\s*(.*)$/);
+    const headlineMain = split?.[1] ?? heroHeadline;
+    const headlineAccent = split?.[2] || "Handmade daily.";
+
+    const tiles = (featured.filter((p) => p.primaryImage).length >= 2 ? featured.filter((p) => p.primaryImage) : featured).slice(0, 3);
+
+    // Next event for the ticketing band (degrades to a plain CTA if none).
+    let nextEvent: Record<string, unknown> | undefined;
+    try {
+      nextEvent = queryOne(
+        `SELECT title, slug, starts_at, venue_name FROM events
+          WHERE status='on_sale' AND starts_at > ?
+          ORDER BY starts_at ASC LIMIT 1`,
+        [new Date().toISOString()],
+      );
+    } catch { nextEvent = undefined; }
 
     return c.html(
       <Page title="Fresh juices, smoothies & snacks in Tigoni" active="/">
-        {/* NAV */}
-        
         {/* HERO */}
-        <section class="juice-hero">
-          <div class="hero-copy">
-            <p class="kicker">Kabuku, Limuru — opposite St. Paul's University</p>
-            <h1 class="hero-title">{heroHeadline || "Refreshing drinks, made fresh daily."}</h1>
-            <p class="hero-sub">{heroSubhead || "Juices, smoothies, fruit blends and snacks from MnM Juice Bar."}</p>
-            <div class="hero-cta-row">
-              <a class="btn btn-primary btn-lg" href="/menu">{heroCta || "Order Now"}</a>
-              <a class="btn btn-ghost btn-lg" href="/about">Our Story</a>
+        <section class="home-hero">
+          <div class="home-hero-copy">
+            <p class="kicker">Tigoni, Limuru · Fresh every day</p>
+            <h1 class="home-title">{headlineMain}<br /><em>{headlineAccent}</em></h1>
+            <p class="home-sub">{heroSubhead}</p>
+            <div class="home-actions">
+              <a class="btn btn-primary btn-lg" href="/menu">Order now</a>
+              <a class="btn btn-ghost btn-lg" href="/events">Event tickets</a>
+            </div>
+            <div class="home-proof">
+              <span class="home-proof-item"><span class="home-proof-dot" aria-hidden="true" />Pressed to order</span>
+              <span class="home-proof-item"><span class="home-proof-dot" aria-hidden="true" />{productCount} drinks &amp; snacks</span>
+              <span class="home-proof-item"><span class="home-proof-dot" aria-hidden="true" />Pickup &amp; delivery</span>
             </div>
           </div>
-          <div class="hero-art" aria-hidden="true">
-            {heroImageUrl ? (
-              <img src={heroImageUrl} alt="MnM Juice Bar — fresh drinks, Kabuku, Limuru" loading="lazy" class="hero-image" />
-            ) : (
-              <div class="hero-fallback">
-                <div class="hero-icon">&#129367;</div>
-                <div class="hero-label">Freshly made daily</div>
-              </div>
-            )}
+
+          <div class="home-visual">
+            <div class="home-visual-grid">
+              {tiles.map((p, i) => (
+                <div class={`home-shot${i === 0 ? " tall" : ""}`}>
+                  {p.primaryImage ? (
+                    <img src={p.primaryImage} alt={p.name} loading={i === 0 ? "eager" : "lazy"} />
+                  ) : (
+                    <div class="product-card-initials">{initialsFor(p.name)}</div>
+                  )}
+                  <span class="home-shot-label">{p.name}</span>
+                </div>
+              ))}
+            </div>
+            <div class="home-badge" aria-hidden="true"><span>Made fresh<strong>Daily</strong></span></div>
+            <p class="home-visual-note">Sample illustrations — owner photography to follow.</p>
           </div>
         </section>
 
-        {/* GALLERY */}
-        <section class="section section-alt" aria-labelledby="gallery-heading">
-          <h2 id="gallery-heading" class="section-head">{galleryHeading || "What we do"}</h2>
-          {galleryItems.length === 0 ? (
-            <div class="gallery-empty">
-              <div class="gallery-empty-tiles" aria-hidden="true">
-                <span class="gallery-empty-tile" />
-                <span class="gallery-empty-tile" />
-                <span class="gallery-empty-tile" />
-              </div>
-              <p class="gallery-empty-copy">
-                <strong>Photographs coming soon.</strong>{" "}
-                <span class="muted">Shots of the shop, our drinks and the team will appear here once the owner adds them — the layout is already built for them.</span>
-              </p>
-            </div>
-          ) : (
-          <div class="product-grid product-grid-dense gallery-grid">
-            {galleryItems.map((item) => (
-              <article class="product-card gallery-item">
-                <div class="product-card-image">
-                  {item.imageUrl ? (
-                    <img src={item.imageUrl} alt={item.altText || item.title || "MnM Juice Bar"} loading="lazy" />
-                  ) : (
-                    <div class="product-card-image-placeholder">
-                      <div class="product-card-image-initials">{item.initials || "Mm"}</div>
-                      <p class="muted small">{item.caption || "Coming soon"}</p>
-                    </div>
-                  )}
-                </div>
-                <div class="product-card-body">
-                  <div class="product-card-category">{item.categoryName || ""}</div>
-                  <h3>{item.title}</h3>
-                  <p class="product-card-desc">{item.caption || ""}</p>
-                </div>
-              </article>
-            ))}
+        {/* RIBBON */}
+        <div class="home-marquee" aria-hidden="true">
+          <div class="marquee-track">
+            {[0, 1].map(() => HOME_MARQUEE.map((word) => <span>{word}</span>))}
           </div>
-          )}
-        </section>
+        </div>
 
         {/* CATEGORIES */}
         <section class="section">
           <div class="section-head">
-            <h2>Our menu</h2>
-            <p class="muted">{productCount} drinks and snacks available — or call {phone} to order.</p>
+            <div>
+              <p class="kicker">Our menu</p>
+              <h2>Find your favourite.</h2>
+            </div>
+            <a class="link-ghost" href="/menu">See everything &rarr;</a>
           </div>
-          <div class="cat-grid">
+          <div class="cat-index">
             {categories.map((cat) => (
-              <a class="cat-card" href={`/menu?category=${cat.id}`}>
-                <div class="cat-number">{String(cat.id).padStart(2, "0")}</div>
-                <div>
-                  <h3>{cat.name}</h3>
-                  <p class="muted small">{cat.description}</p>
-                </div>
-                <span class="cat-arrow">&rarr;</span>
+              <a class="cat-index-row" href={`/menu?category=${cat.id}`}>
+                <span class="cat-index-num">{String(cat.id).padStart(2, "0")}</span>
+                <span class="cat-index-name">
+                  {cat.name}
+                  <span class="cat-index-desc">{cat.description}</span>
+                </span>
+                <span class="cat-index-arrow" aria-hidden="true">&rarr;</span>
               </a>
             ))}
           </div>
         </section>
 
-        {/* FEATURED */}
+        {/* SIGNATURES */}
         {featured.length > 0 && (
           <section class="section">
             <div class="section-head">
-              <h2>Featured drinks</h2>
-              <a class="link link-ghost" href="/menu">View full menu &rarr;</a>
+              <div>
+                <p class="kicker">Signatures</p>
+                <h2>What people order.</h2>
+              </div>
+              <p class="muted small">Prices confirmed in store. Choose a size and add-ons on any drink.</p>
             </div>
             <div class="product-grid">
-              {featured.map((p) => (
-                <ProductCard product={p} />
-              ))}
+              {featured.map((p) => <ProductCard product={p} />)}
             </div>
           </section>
         )}
 
-        {/* BESTSELLERS */}
-        {bestsellers.length > 0 && (
-          <section class="section section-alt">
-            <div class="section-head">
-              <h2>Popular right now</h2>
+        {/* TICKETS */}
+        <section class="ticket-band">
+          <div class="ticket-band-inner">
+            <div>
+              <p class="kicker kicker-light">MnM Tickets</p>
+              <h2>More than<br /><em>a juice bar.</em></h2>
+              <p>Live events, authorised ticket sales and a QR ticket the moment you pay. No printing, no queue — just show your phone at the gate.</p>
+              <a class="btn btn-primary" href="/events">Browse events</a>
+              <div class="ticket-band-meta">
+                <span>Instant QR tickets</span>
+                <span>Verified once at the gate</span>
+              </div>
             </div>
-            <div class="product-grid">
-              {bestsellers.map((p) => (
-                <ProductCard product={p} />
-              ))}
-            </div>
-          </section>
-        )}
+            {nextEvent ? (
+              <div class="event-peek">
+                <p class="event-peek-label">Next on sale</p>
+                <p class="event-peek-date">
+                  {new Date(String(nextEvent.starts_at)).toLocaleDateString("en-KE", { day: "numeric", month: "long" })}
+                </p>
+                <p class="event-peek-title">{String(nextEvent.title)}</p>
+                <p class="event-peek-venue">{String(nextEvent.venue_name)}</p>
+                <a class="event-peek-link" href={`/events/${String(nextEvent.slug)}`}>View event &amp; tickets &rarr;</a>
+              </div>
+            ) : (
+              <div class="event-peek">
+                <p class="event-peek-label">MnM Tickets</p>
+                <p class="event-peek-title">Nothing on sale right now.</p>
+                <p class="event-peek-venue">New events are announced here and at the bar.</p>
+                <a class="event-peek-link" href="/tickets">How ticketing works &rarr;</a>
+              </div>
+            )}
+          </div>
+        </section>
 
-        {/* HOW IT WORKS */}
+        {/* STORY + VISIT */}
         <section class="section">
-          <div class="panel">
-            <h2>How to order from MnM</h2>
-            <ol class="steps-inline">
-              <li><span>Browse the menu</span></li>
-              <li><span>Choose your drinks and snacks</span></li>
-              <li><span>Pickup or delivery</span></li>
-              <li><span>We prepare your order</span></li>
-              <li><span>Collect or receive your order</span></li>
-            </ol>
-            <p class="hint">Call {phone} for large orders or if you have questions. Opening hours: {plainText(hours)}</p>
-          </div>
-        </section>
-
-        {/* ABOUT TEASER */}
-        <section class="section section-alt">
-          <div class="panel about-teaser">
-            <h2>What is MnM Juice Bar?</h2>
-            <div class="about-text">
-              <div dangerouslySetInnerHTML={{ __html: aboutBlurb || "<p>A local juice bar in Kabuku, Limuru — serving fresh drinks and snacks with a friendly neighbourhood feel.</p>" }} />
+          <div class="story-split">
+            <div class="story-copy">
+              <p class="kicker">Our story</p>
+              <h2>Fruit first. Always.</h2>
+              <div class="about-text">
+                <div dangerouslySetInnerHTML={{ __html: aboutBlurb || "<p>A local juice bar in Tigoni, Limuru — fresh drinks and snacks with a friendly neighbourhood feel.</p>" }} />
+              </div>
+              <p class="story-quote">“No concentrates. No shortcuts. Just fruit, ice and a little patience.”</p>
+              <a class="btn btn-secondary" href="/about">Read our story</a>
             </div>
-            <div class="about-links">
-              <a class="btn btn-secondary" href="/about">Read more</a>
-              <a class="btn btn-ghost" href="/contact">Get in touch</a>
+            <div class="visit-list">
+              <div class="visit-item">
+                <h3>Find us</h3>
+                <p>{address || "Tigoni, Limuru, Kenya"}</p>
+              </div>
+              <div class="visit-item">
+                <h3>Call ahead</h3>
+                <p><a class="phone-link" href={`tel:${phone.replace(/\s+/g, "")}`}>{phone}</a></p>
+              </div>
+              <div class="visit-item">
+                <h3>Opening hours</h3>
+                <div class="opening-hours" dangerouslySetInnerHTML={{ __html: hours || "Mon–Fri 8am–6pm<br/>Sat 9am–5pm<br/>Sun 10am–4pm" }} />
+              </div>
+              <div class="visit-item">
+                <h3>Catering</h3>
+                <p>Feeding a crowd? <a href="/catering">Request a quote</a>.</p>
+              </div>
             </div>
           </div>
         </section>
-
-        {/* SOCIAL */}
-        <section class="section">
-          <div class="social-row">
-            {socialInstagram && <a class="social-link" href={socialInstagram} target="_blank" rel="noopener">Instagram</a>}
-            {socialFacebook && <a class="social-link" href={socialFacebook} target="_blank" rel="noopener">Facebook</a>}
-            <a class="social-link" href="/contact">Contact us</a>
-          </div>
-        </section>
-
-        {/* FOOTER */}
-        </Page>,
+      </Page>,
     );
   });
 
@@ -240,20 +251,34 @@ export function juicePublicRoutes(config: AppConfig): Hono {
       <Page title={pageTitle} active="/menu">
         
         <div class="catalogue-page">
-          <div class="catalogue-header">
-            <h1>{pageTitle}</h1>
-            <div class="catalogue-tools">
-              <form method="get" action="/menu" class="search-form">
-                <input type="search" name="q" placeholder="Search drinks, snacks…" value={search || ""} />
-              </form>
-              <div class="cart-mini">
-                <a class="btn btn-primary" href="/cart">
-                  <span class="cart-icon">&#128722;</span>
-                  <span class="cart-text">Your order</span>
-                  <span class="cart-count" id="cart-count-mini">0</span>
-                </a>
-              </div>
+          <div class="menu-hero">
+            <p class="kicker">Freshly made</p>
+            <h1>The menu</h1>
+            <p class="lead">
+              {search
+                ? `Results for “${search}”.`
+                : "Juices, smoothies, fruit blends, milkshakes and snacks. Pick a size, add what you like, and we'll make it when you order."}
+            </p>
+          </div>
+
+          <div class="menu-tools">
+            <form method="get" action="/menu" class="menu-search">
+              <input type="search" name="q" placeholder="Search drinks, snacks…" value={search || ""} aria-label="Search the menu" />
+              <button type="submit" aria-label="Search">&rarr;</button>
+            </form>
+            <div class="cart-mini">
+              <a class="btn btn-primary" href="/cart">
+                <span>Your order</span>
+                <span class="cart-count" id="cart-count-mini">0</span>
+              </a>
             </div>
+          </div>
+
+          <div class="chip-row">
+            <a class={!activeCategory ? "chip is-active" : "chip"} href="/menu">All</a>
+            {categories.map((cat) => (
+              <a class={activeCategory === cat.id ? "chip is-active" : "chip"} href={`/menu?category=${cat.id}`}>{cat.name}</a>
+            ))}
           </div>
 
           {categories.length === 0 ? (
@@ -328,7 +353,7 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                 <img class="product-image" src={product.primaryImage} alt={product.name} />
               ) : (
                 <div class="product-image-placeholder">
-                  <div class="product-image-initials">{product.name.split(" ").map((w) => w[0]).join("").slice(0, 2).toUpperCase()}</div>
+                  <div class="product-image-initials">{initialsFor(product.name)}</div>
                   <p class="muted small">Photo pending — owner to upload</p>
                 </div>
               )}
@@ -353,7 +378,7 @@ export function juicePublicRoutes(config: AppConfig): Hono {
 
               <div class="product-price-block">
                 <div class="product-price">{formatMinor(product.priceMinor, product.currency)}</div>
-                <p class="muted small">In {product.currency}</p>
+                <p class="muted small">Base price · sizes and add-ons below</p>
               </div>
 
               {/* SIZES */}
@@ -365,7 +390,7 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                       <label class="option-radio">
                         <input type="radio" name="size" value={s.label} data-price={s.priceMinor} />
                         <span class="option-name">{s.label}</span>
-                        <span class="option-price">+{formatMinor(s.priceMinor, product.currency)}</span>
+                        <span class="option-price">{s.priceMinor === 0 ? "Included" : `+ ${formatMinor(s.priceMinor, product.currency)}`}</span>
                       </label>
                     ))}
                   </div>
@@ -381,7 +406,7 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                       <label class="option-check">
                         <input type="checkbox" name="addon" value={a.name} data-price={a.priceMinor} />
                         <span class="option-name">{a.name}</span>
-                        <span class="option-price">+{formatMinor(a.priceMinor, product.currency)}</span>
+                        <span class="option-price">{a.priceMinor === 0 ? "Free" : `+ ${formatMinor(a.priceMinor, product.currency)}`}</span>
                       </label>
                     ))}
                   </div>
@@ -620,7 +645,15 @@ export function juicePublicRoutes(config: AppConfig): Hono {
       <Page title="Checkout — MnM Juice Bar">
         
         <div class="checkout-page">
-          <h1>Checkout</h1>
+          <div class="checkout-head">
+            <ol class="step-rail" aria-label="Checkout progress">
+              <li>Bag</li>
+              <li class="is-current">Details</li>
+              <li>Confirm</li>
+            </ol>
+            <h1>Checkout</h1>
+            <p class="muted">Almost there — tell us who we're making this for.</p>
+          </div>
 
           <div class="checkout-layout">
             {/* ORDER SUMMARY */}
@@ -645,10 +678,14 @@ export function juicePublicRoutes(config: AppConfig): Hono {
               </table>
               <div class="summary-lines">
                 <div class="summary-line"><span>Subtotal</span><span>{formatMinor(totals.subtotalMinor, "KES")}</span></div>
-                {totals.deliveryZoneId && deliveryZone && (
-                  <div class="summary-line"><span>Delivery — {deliveryZone.name}</span><span>{formatMinor(totals.deliveryFeeMinor, "KES")}</span></div>
-                )}
-                <div class="summary-line total"><span>Total payable</span><span>{formatMinor(totals.totalMinor, "KES")}</span></div>
+                <div class="summary-line" data-delivery-line style={totals.deliveryFeeMinor > 0 ? "" : "display:none"}>
+                  <span data-delivery-label>Delivery{feeZoneName(deliveryZone)}</span>
+                  <span data-delivery-value>{formatMinor(totals.deliveryFeeMinor, "KES")}</span>
+                </div>
+                <div class="summary-line total" data-total-line data-base-minor={totals.totalMinor - totals.deliveryFeeMinor}>
+                  <span>Total payable</span>
+                  <span data-total-value>{formatMinor(totals.totalMinor, "KES")}</span>
+                </div>
               </div>
             </div>
 
@@ -657,7 +694,6 @@ export function juicePublicRoutes(config: AppConfig): Hono {
               <form method="post" action="/juice/checkout">
                 {/* hidden cart snapshot — server recomputes totals from product IDs + snapshot prices */}
                 <input type="hidden" name="items" value={itemsJson ?? ""} />
-                <input type="hidden" name="deliveryZoneId" value={deliveryZoneIdRaw ?? ""} />
 
                 <div class="form-section">
                   <h3>Contact details</h3>
@@ -689,25 +725,27 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                       <label>Order type</label>
                       <div class="toggle-opt-row">
                         <label class="toggle-opt">
-                          <input type="radio" name="type" value="pickup" checked />
+                          <input type="radio" name="type" value="pickup" checked={!deliveryZoneId} />
                           <span>Pickup</span>
                         </label>
                         <label class="toggle-opt">
-                          <input type="radio" name="type" value="delivery" />
+                          <input type="radio" name="type" value="delivery" checked={!!deliveryZoneId} />
                           <span>Delivery</span>
                         </label>
                       </div>
                     </div>
                   </div>
 
-                  <div id="delivery-fields" class="delivery-fields-hidden">
+                  <div id="delivery-fields" class={deliveryZoneId ? "" : "delivery-fields-hidden"}>
                     <div class="form-row">
                       <div class="field">
                         <label for="deliveryZone">Delivery area</label>
                         <select id="deliveryZone" name="deliveryZoneId" required>
                           <option value="">Select your area…</option>
                           {deliveryZones.map((z) => (
-                            <option key={z.id} value={z.id}>{z.name} — {formatMinor(z.feeMinor, "KES")} delivery fee</option>
+                            <option key={z.id} value={z.id} data-fee={z.feeMinor} data-name={z.name} selected={deliveryZone?.id === z.id}>
+                              {z.name} — {formatMinor(z.feeMinor, "KES")} delivery fee
+                            </option>
                           ))}
                         </select>
                         <p class="hint">If your area isn't listed, choose a nearby one and call us to confirm.</p>
@@ -734,7 +772,7 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                     </div>
                   </div>
 
-                  <div id="pickup-fields">
+                  <div id="pickup-fields" style={deliveryZoneId ? "display:none" : ""}>
                     <div class="form-row">
                       <div class="field">
                         <label for="pickupName">Pickup name (optional)</label>
@@ -764,18 +802,26 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                   <h3>Review and place order</h3>
                   <div class="checkout-total-block">
                     <div class="checkout-total-line"><span>Subtotal</span><span>{formatMinor(totals.subtotalMinor, "KES")}</span></div>
-                    {totals.deliveryZoneId && deliveryZone && (
-                      <div class="checkout-total-line"><span>Delivery — {deliveryZone.name}</span><span>{formatMinor(totals.deliveryFeeMinor, "KES")}</span></div>
-                    )}
-                    <div class="checkout-total-line total"><span>Total payable</span><span>{formatMinor(totals.totalMinor, "KES")}</span></div>
+                    <div class="checkout-total-line" data-delivery-line style={totals.deliveryFeeMinor > 0 ? "" : "display:none"}>
+                      <span data-delivery-label>Delivery{feeZoneName(deliveryZone)}</span>
+                      <span data-delivery-value>{formatMinor(totals.deliveryFeeMinor, "KES")}</span>
+                    </div>
+                    <div class="checkout-total-line total" data-total-line data-base-minor={totals.totalMinor - totals.deliveryFeeMinor}>
+                      <span>Total payable</span>
+                      <span data-total-value>{formatMinor(totals.totalMinor, "KES")}</span>
+                    </div>
                   </div>
                   <p class="hint">All amounts are calculated on the server from our current prices.</p>
+                  <p class="notice warn">
+                    <strong>Demonstration checkout — no online payment is taken.</strong>{" "}
+                    Your order is saved for staff to prepare; pay on collection or delivery. Live M-Pesa is a separate integration.
+                  </p>
 
                   <div class="form-actions">
                     <a class="btn btn-ghost" href="/cart">&larr; Back to cart</a>
-                    <button type="submit" class="btn btn-primary btn-lg">Place order — {formatMinor(totals.totalMinor, "KES")}</button>
+                    <button type="submit" class="btn btn-primary btn-lg" data-place-order>Place order — {formatMinor(totals.totalMinor, "KES")}</button>
                   </div>
-                  <p class="hint">By placing this order you agree to pay {formatMinor(totals.totalMinor, "KES")} via M-Pesa when prompted. Orders are confirmed once payment is received.</p>
+                  <p class="hint">By placing this order you reserve the items at the prices shown. No card or M-Pesa prompt is issued in this demonstration.</p>
                 </div>
               </form>
             </div>
@@ -856,13 +902,63 @@ export function juicePublicRoutes(config: AppConfig): Hono {
       );
     }
 
-    // Redirect to order confirmation page
-    return c.redirect(`/juice/order/${encodeURIComponent(result.orderRef!)}`);
+    const customer = getCustomerBySession(getCookie(c, CUSTOMER_COOKIE));
+    if (customer) linkJuiceOrderToCustomer(result.orderId!, customer.id);
+
+    // Redirect to the token-protected order confirmation page.
+    return c.redirect(`/juice/order/${encodeURIComponent(result.orderRef!)}?t=${encodeURIComponent(result.accessToken!)}`);
+  });
+
+  // A customer who loses the original link can re-open the order with the
+  // reference and the phone number used at checkout. A fresh token is issued.
+  app.post("/juice/order/lookup", async (c) => {
+    if (!stateChangeOriginAllowed(c, config.publicOrigins)) {
+      return c.html(<Page title="Blocked"><div class="panel notice bad">Cross-origin request blocked.</div></Page>, 403);
+    }
+    const body = await c.req.parseBody();
+    const ref = String(body.ref ?? "").trim();
+    const phone = normalisePhoneKenya(String(body.phone ?? ""));
+    const order = ref ? juiceOrderByRef(ref) : null;
+    if (!order || !phone || normalisePhoneKenya(order.customerPhone) !== phone) {
+      return c.html(
+        <Page title="Order link">
+          <div class="panel narrow">
+            <h1>Order link</h1>
+            <p class="notice bad">We could not match that order reference and phone number. Check both and try again, or call {businessSetting("contact_phone")}.</p>
+            <form method="post" action="/juice/order/lookup">
+              <div class="field"><label>Order reference</label><input name="ref" value={ref} required /></div>
+              <div class="field"><label>Phone used at checkout</label><input name="phone" inputmode="tel" required /></div>
+              <button class="btn btn-primary" type="submit">Open order</button>
+            </form>
+          </div>
+        </Page>,
+        404,
+      );
+    }
+    const token = issueJuiceOrderToken(order.id);
+    return c.redirect(`/juice/order/${encodeURIComponent(order.orderRef)}?t=${encodeURIComponent(token)}`);
   });
 
   // ---------- ORDER CONFIRMATION ----------
   app.get("/juice/order/:ref", (c) => {
     const ref = c.req.param("ref");
+    const token = c.req.query("t") ?? "";
+    if (!checkJuiceOrderAccess(ref, token)) {
+      return c.html(
+        <Page title="Order link required">
+          <div class="panel narrow">
+            <h1>Open your order</h1>
+            <p class="muted">For your privacy, this order page needs the private link from checkout. If you lost it, enter the order reference and the phone number used at checkout.</p>
+            <form method="post" action="/juice/order/lookup">
+              <div class="field"><label>Order reference</label><input name="ref" value={ref} required /></div>
+              <div class="field"><label>Phone used at checkout</label><input name="phone" inputmode="tel" required /></div>
+              <button class="btn btn-primary" type="submit">Open order</button>
+            </form>
+          </div>
+        </Page>,
+        403,
+      );
+    }
     const order = juiceOrderByRef(ref);
     if (!order) {
       return c.html(
@@ -877,9 +973,20 @@ export function juicePublicRoutes(config: AppConfig): Hono {
       );
     }
 
+    // A freshly created order clears the local bag; reopening an old order
+    // link later must not wipe a cart the customer has started since.
+    const createdMs = Date.parse(order.createdAt);
+    const justPlaced = Number.isFinite(createdMs) && Date.now() - createdMs < 5 * 60_000;
     const statusLabel = statusLabelFor(order.status);
     const isNew = order.status === "new";
     const isPaid = order.paymentStatus === "succeeded";
+    const stepLabels = order.type === "delivery"
+      ? ["Received", "Preparing", "Ready", "On the way", "Delivered"]
+      : ["Received", "Preparing", "Ready", "Awaiting collection", "Collected"];
+    const stepIndex = ({
+      new: 0, accepted: 0, preparing: 1, ready_for_pickup: 2, ready_for_dispatch: 2,
+      out_for_delivery: 3, delivered: 4,
+    } as Record<string, number>)[order.status] ?? 0;
 
     return c.html(
       <Page title={`Order ${order.orderRef} — MnM Juice Bar`}>
@@ -887,7 +994,16 @@ export function juicePublicRoutes(config: AppConfig): Hono {
         <div class="order-confirm-page">
           <div class="order-confirm-card">
             <h2>Thank you, {order.customerName.split(" ")[0] || "friend"}!</h2>
-            <p class="muted">Order reference: <strong>{order.orderRef}</strong></p>
+            <p class="order-ref-line">Order {order.orderRef}</p>
+
+            <div class="order-journey" aria-label={`Order status: ${statusLabel}`}>
+              {stepLabels.map((label, i) => (
+                <div class={`journey-step${i < stepIndex ? " is-done" : ""}${i === stepIndex ? " is-current" : ""}`}>
+                  <div class="journey-bar" />
+                  <span>{label}</span>
+                </div>
+              ))}
+            </div>
 
             <div class="order-status-block">
               <div class="status-pill">
@@ -895,11 +1011,11 @@ export function juicePublicRoutes(config: AppConfig): Hono {
                 <span class="status-label">{statusLabel}</span>
               </div>
               {isNew ? (
-                <p class="hint">Your order is received. We'll call you to confirm payment and preparation.</p>
+                <p class="hint">Your order is received and the team has been notified. We'll call you if anything needs confirming.</p>
               ) : isPaid ? (
-                <p class="notice ok">Payment received! We're preparing your order.</p>
+                <p class="notice ok">Payment recorded — we're preparing your order.</p>
               ) : (
-                <p class="notice warn">Awaiting payment confirmation.</p>
+                <p class="notice warn">No online payment was taken. Pay on collection or delivery.</p>
               )}
             </div>
 
@@ -952,6 +1068,16 @@ export function juicePublicRoutes(config: AppConfig): Hono {
             </div>
           </div>
         </div>
+
+        {justPlaced && (
+          <script dangerouslySetInnerHTML={{ __html: `
+            try { sessionStorage.removeItem('mnm_cart_items'); } catch (e) {}
+            document.querySelectorAll('#cart-count-mini, [data-cart-count]').forEach(function (el) { el.textContent = '0'; });
+            var mini = document.getElementById('cart-count-mini');
+            if (mini) mini.style.display = 'none';
+            if (window.history && window.history.replaceState) window.history.replaceState({}, '', location.pathname);
+          ` }} />
+        )}
 
         </Page>,
     );
@@ -1298,7 +1424,7 @@ function ProductCard({ product: p }: { product: any }) {
         {p.primaryImage ? (
           <img src={p.primaryImage} alt={p.name} loading="lazy" />
         ) : (
-          <div class="product-card-initials">{p.name.split(" ").map((w: string) => w[0]).join("").slice(0, 2).toUpperCase()}</div>
+          <div class="product-card-initials">{initialsFor(p.name)}</div>
         )}
         {p.bestseller && <span class="card-tag bestseller">Popular</span>}
         {p.featured && !p.bestseller && <span class="card-tag featured">Featured</span>}
@@ -1327,6 +1453,17 @@ function ProductCard({ product: p }: { product: any }) {
  * rendered with dangerouslySetInnerHTML where a block is wanted; this helper is
  * for places that must stay plain text (so tags can never leak into a sentence).
  */
+/** " — Zone" suffix used by the live delivery-fee line. */
+function feeZoneName(zone: { name: string } | null | undefined): string {
+  return zone ? ` — ${zone.name}` : "";
+}
+
+/** Two clean initials for placeholder art (ignores punctuation and sizes). */
+function initialsFor(name: string): string {
+  const words = String(name).replace(/[^A-Za-z ]/g, " ").split(/\s+/).filter(Boolean);
+  return (words.slice(0, 2).map((w) => w[0]).join("") || "Mm").toUpperCase();
+}
+
 function plainText(html: string): string {
   return String(html ?? "")
     .replace(/<\s*br\s*\/?\s*>/gi, " · ")

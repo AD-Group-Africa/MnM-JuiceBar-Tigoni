@@ -20,6 +20,11 @@ export const cartInteractivityScript = `
   function getCart() {
     try { return JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '[]'); } catch { return []; }
   }
+  // Products without sizes are stored with no sizeLabel but the cart table is
+  // rendered with "Standard"; compare canonically so remove/qty still match.
+  function canonicalSize(value) {
+    return (!value || value === 'Standard') ? 'Standard' : value;
+  }
   function setCart(items) {
     sessionStorage.setItem(STORAGE_KEY, JSON.stringify(items));
     updateMiniCartCount();
@@ -28,7 +33,7 @@ export const cartInteractivityScript = `
     var items = getCart();
     var existing = items.find(function(i) {
       return i.productId === productId &&
-             i.sizeLabel === sizeLabel &&
+             canonicalSize(i.sizeLabel) === canonicalSize(sizeLabel) &&
              JSON.stringify(i.addonsChosen || []) === JSON.stringify(addonsChosen || []);
     });
     if (existing) {
@@ -49,7 +54,7 @@ export const cartInteractivityScript = `
   function removeFromCart(productId, sizeLabel, addonsChosen) {
     var items = getCart().filter(function(i) {
       return !(i.productId === productId &&
-                i.sizeLabel === sizeLabel &&
+                canonicalSize(i.sizeLabel) === canonicalSize(sizeLabel) &&
                 JSON.stringify(i.addonsChosen || []) === JSON.stringify(addonsChosen || []));
     });
     setCart(items);
@@ -59,7 +64,7 @@ export const cartInteractivityScript = `
     var items = getCart();
     var found = items.find(function(i) {
       return i.productId === productId &&
-             i.sizeLabel === sizeLabel &&
+             canonicalSize(i.sizeLabel) === canonicalSize(sizeLabel) &&
              JSON.stringify(i.addonsChosen || []) === JSON.stringify(addonsChosen || []);
     });
     if (found) {
@@ -289,12 +294,48 @@ export const cartInteractivityScript = `
     });
   });
 
+  // Live checkout totals: choosing delivery or a zone updates the fee line and
+  // total before submit, so the price shown is the price placed.
+  function checkoutMoney(minor) {
+    return 'KSh ' + (minor / 100).toLocaleString('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function syncCheckoutTotals() {
+    var lines = document.querySelectorAll('[data-total-line]');
+    if (lines.length === 0) return;
+    var type = document.querySelector('input[name="type"]:checked');
+    var isDelivery = !!type && type.value === 'delivery';
+    var zoneSelect = document.querySelector('select[name="deliveryZoneId"]');
+    var option = zoneSelect ? zoneSelect.options[zoneSelect.selectedIndex] : null;
+    var fee = isDelivery && option && option.value ? Number(option.getAttribute('data-fee')) || 0 : 0;
+    document.querySelectorAll('[data-delivery-line]').forEach(function(line) {
+      line.style.display = fee > 0 ? '' : 'none';
+      var label = line.querySelector('[data-delivery-label]');
+      if (label) label.textContent = 'Delivery' + (option && fee > 0 ? ' — ' + (option.getAttribute('data-name') || '') : '');
+      var value = line.querySelector('[data-delivery-value]');
+      if (value) value.textContent = checkoutMoney(fee);
+    });
+    var base = Number(lines[0].getAttribute('data-base-minor')) || 0;
+    lines.forEach(function(line) {
+      var value = line.querySelector('[data-total-value]');
+      if (value) value.textContent = checkoutMoney(base + fee);
+    });
+    var btn = document.querySelector('[data-place-order]');
+    if (btn) btn.textContent = 'Place order — ' + checkoutMoney(base + fee);
+  }
+  document.querySelectorAll('input[name="type"]').forEach(function(radio) {
+    radio.addEventListener('change', syncCheckoutTotals);
+  });
+  document.querySelectorAll('select[name="deliveryZoneId"]').forEach(function(select) {
+    select.addEventListener('change', syncCheckoutTotals);
+  });
+
   // Initial order-type sync: the checkout page opens on Pickup, so the hidden
   // delivery-zone select must not be required until Delivery is chosen.
   (function() {
     var zoneSelect = document.querySelector('select[name="deliveryZoneId"]');
     var checkedType = document.querySelector('input[name="type"]:checked');
     if (zoneSelect && checkedType) zoneSelect.required = checkedType.value === 'delivery';
+    syncCheckoutTotals();
   })();
 
   // Delivery zone selection updates URL and reloads cart to show updated fee

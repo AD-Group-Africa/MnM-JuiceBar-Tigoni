@@ -7,31 +7,25 @@
  */
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { getCookie } from "hono/cookie";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { AppConfig } from "../config.ts";
 import { queryOne, queryAll } from "../db.ts";
 import { createOrder, LIFECYCLE, normalisePhoneKenya, issueGuestToken, checkGuestAccess, signGuestLink } from "../orders.ts";
-import { getProvider, recordInitiated, handleCallback } from "../payments/index.ts";
+import { getProvider, recordInitiating, completeInitiation, failInitiation, handleCallback } from "../payments/index.ts";
 import { formatMinor } from "../money.ts";
-import { signPayload } from "../auth.ts";
+import { signPayload, stateChangeOriginAllowed } from "../auth.ts";
 import { Page } from "../views/layout.tsx";
+import { CUSTOMER_COOKIE, getCustomerBySession, linkTicketOrderToCustomer } from "../customers.ts";
 
 export function checkoutRoutes(config: AppConfig): Hono {
   const app = new Hono();
   const provider = getProvider(config);
 
   app.post("/checkout", async (c) => {
-    const originOk = (() => {
-    const origin = c.req.header("origin") ?? c.req.header("referer") ?? "";
-    if (!origin) return false;
-    try {
-      const o = new URL(origin);
-      const a = new URL(config.publicOrigins[0] ?? "http://localhost:8787");
-      return o.protocol === a.protocol && o.host === a.host;
-    } catch {
-      return false;
-    }
-  })();
+    // Use the shared allow-list (all configured origins, including development
+    // loopback aliases) rather than silently comparing against only the first.
+    const originOk = stateChangeOriginAllowed(c, config.publicOrigins);
     if (!originOk) return c.html(<Page title="Blocked"><div class="panel notice bad">Cross-origin checkout is not allowed.</div></Page>, 403);
     const form = await c.req.parseBody();
     const categoryId = Number(form.category_id);
@@ -45,13 +39,33 @@ export function checkoutRoutes(config: AppConfig): Hono {
       return c.html(<Page title="Order failed"><div class="panel notice bad">{res.msg ?? "Could not create order."}</div><p><a class="btn btn-ghost" href="/events">Back to events</a></p></Page>, 400);
     }
     const order = queryOne("SELECT * FROM orders WHERE id=?", [res.orderId])!;
+    const customer = getCustomerBySession(getCookie(c, CUSTOMER_COOKIE));
+    if (customer) linkTicketOrderToCustomer(res.orderId, customer.id);
 
-    // Payment initiation
-    const init = await provider.initiate(res.orderId, Number(order.total_minor), String(order.currency), normalisePhoneKenya(phone)!);
-    if (!init.ok) {
-      return c.html(<Page title="Payment unavailable"><div class="panel notice bad">Payment could not be started. Your order {res.orderRef} is saved; try again from My Tickets or contact support.</div></Page>, 502);
+    // Payment initiation. Persist the local attempt first so a provider-side
+    // charge can never exist without an audit anchor; one active attempt per order.
+    const totalMinor = Number(order.total_minor);
+    const currency = String(order.currency);
+    const msisdn = normalisePhoneKenya(phone)!;
+    const attempt = recordInitiating(res.orderId, provider.name, totalMinor, currency, msisdn);
+    if (!attempt.created) {
+      const token = issueGuestToken(res.orderId);
+      return c.redirect(`/pay/status?ref=${encodeURIComponent(res.orderRef)}&t=${encodeURIComponent(token)}`);
     }
-    recordInitiated(res.orderId, provider.name, init.providerRequestId, Number(order.total_minor), String(order.currency), normalisePhoneKenya(phone)!);
+    let init;
+    try {
+      init = await provider.initiate(res.orderId, totalMinor, currency, msisdn);
+    } catch (err) {
+      failInitiation(attempt.paymentId, err instanceof Error ? err.message : "provider initiation threw");
+      return c.html(<Page title="Payment unavailable"><div class="panel notice bad">Payment could not be started. Your order {res.orderRef} is saved; try again or contact support.</div></Page>, 502);
+    }
+    if (!init.ok || !init.providerRequestId) {
+      failInitiation(attempt.paymentId, init.msg ?? "provider did not return a request id");
+      return c.html(<Page title="Payment unavailable"><div class="panel notice bad">Payment could not be started. Your order {res.orderRef} is saved; try again or contact support.</div></Page>, 502);
+    }
+    if (!completeInitiation(attempt.paymentId, init.providerRequestId, init.merchantRequestId)) {
+      return c.html(<Page title="Payment unavailable"><div class="panel notice bad">Payment was started but could not be confirmed locally. Order {res.orderRef} needs support review.</div></Page>, 500);
+    }
 
     // Guest access token (only hash stored) + signed follow-up link
     const token = issueGuestToken(res.orderId);
@@ -106,7 +120,7 @@ async function simulatedCallbackProvider(providerRequestId: string, totalMinor: 
   const parsed = (await import("../payments/daraja.ts")).parseDarajaCallback(body) as
     { providerRequestId: string; outcome: "succeeded" | "failed"; amountMinor?: number; providerRef?: string } | null;
   if (!parsed) throw new Error("sim callback parse failed");
-  handleCallback({ provider: config.paymentProvider, ...parsed, raw: body });
+  handleCallback({ provider: "dev-simulator", ...parsed, raw: body });
 }
 
 /** order page helpers taking plain numbers for status codes */

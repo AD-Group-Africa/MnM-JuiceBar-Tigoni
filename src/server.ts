@@ -8,10 +8,14 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { loadConfig } from "./config.ts";
 import { migrate } from "./db.ts";
+import { reconcileSoldCounts } from "./orders.ts";
 import { createApp } from "./app.tsx";
 
 const config = loadConfig();
 migrate(config.databaseFile);
+const reconciled = reconcileSoldCounts();
+if (reconciled.updated) console.log(`[orders] reconciled sold_count for ${reconciled.updated} ticket category/categories`);
+if (reconciled.failed) console.warn(`[orders] ${reconciled.failed} ticket category/categories could not be reconciled`);
 
 const app = createApp(config);
 app.use("*", serveStatic({ root: "./public" }));

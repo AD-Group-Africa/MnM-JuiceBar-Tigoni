@@ -100,11 +100,11 @@ If you have M-Pesa credentials:
 
    | Role | Phone | Password |
    | --- | --- | --- |
-   | Owner | `+254705687273` | `dev-owner-password` |
-   | Manager | `+254700000002` | `dev-manager-password` |
-   | Sales staff | `+254700000003` | `dev-staff-password` |
-   | Gate scanner | `+254700000004` | `dev-scanner-password` |
-   | AD platform admin | `+254700000005` | `dev-admin-password` |
+   | Owner | `+254705687273` | `seed password (db/seed.ts)` |
+   | Manager | `+254700000002` | `seed password (db/seed.ts)` |
+   | Sales staff | `+254700000003` | `seed password (db/seed.ts)` |
+   | Gate scanner | `+254700000004` | `seed password (db/seed.ts)` |
+   | AD platform admin | `+254700000005` | `seed password (db/seed.ts)` |
 
    Use `http://localhost:8787` (not `127.0.0.1`): the origin allow-list is `PUBLIC_ORIGINS`, which defaults to `http://localhost:8787`, so sign-in and other state-changing forms are rejected from any other host.
 5. Create your first event via `/staff/events` → fill form → publish.

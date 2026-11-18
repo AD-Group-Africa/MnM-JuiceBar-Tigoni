@@ -61,11 +61,11 @@ The local database was seeded with development accounts. These are **dev-only fi
 
 | Role | Phone | Password | Can reach |
 | --- | --- | --- | --- |
-| Owner | `+254705687273` | `dev-owner-password` | everything, including `/admin` |
-| Manager | `+254700000002` | `dev-manager-password` | dashboard, events, orders |
-| Sales staff | `+254700000003` | `dev-staff-password` | dashboard, orders |
-| Gate scanner | `+254700000004` | `dev-scanner-password` | **only** `/staff/scan` (sign-in drops them straight there) |
-| AD platform admin | `+254700000005` | `dev-admin-password` | everything, including `/admin` |
+| Owner | `+254705687273` | `seed password (db/seed.ts)` | everything, including `/admin` |
+| Manager | `+254700000002` | `seed password (db/seed.ts)` | dashboard, events, orders |
+| Sales staff | `+254700000003` | `seed password (db/seed.ts)` | dashboard, orders |
+| Gate scanner | `+254700000004` | `seed password (db/seed.ts)` | **only** `/staff/scan` (sign-in drops them straight there) |
+| AD platform admin | `+254700000005` | `seed password (db/seed.ts)` | everything, including `/admin` |
 
 Sign in at <http://localhost:8787/staff/login>. The footer link **Staff sign-in** also works.
 

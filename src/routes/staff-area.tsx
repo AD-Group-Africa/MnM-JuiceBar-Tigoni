@@ -10,8 +10,8 @@ import type { AppConfig } from "../config.ts";
 import { SESSION_COOKIE, getSessionUser, roleAllows, stateChangeOriginAllowed } from "../auth.ts";
 import { queryAll, queryOne, run, tx } from "../db.ts";
 import { formatMinor } from "../money.ts";
-import { startRefund } from "../orders.ts";
-import { Page } from "../views/layout.tsx";
+import { startRefund, completeRefund, cancelEventAndQueueRefunds } from "../orders.ts";
+import { StaffPage } from "../views/layout.tsx";
 import { newOrderRef as _n } from "../ids.ts";
 void _n;
 
@@ -42,15 +42,33 @@ export function staffAreaRoutes(config: AppConfig): Hono {
         GROUP BY e.id ORDER BY gross DESC`,
     ) as { title: string; orders: number; gross: number; mnm: number; ad: number }[];
     return c.html(
-      <Page title="Staff dashboard" active="/staff">
-        <h1>MnM Trading Dashboard</h1>
-        <p class="muted">Signed in as <strong>{u.fullName}</strong> ({u.role}).</p>
-        <div class="stat-grid">
-          <div class="stat"><div class="v">{totalPaid}</div><div class="k">paid orders (all time)</div></div>
-          <div class="stat"><div class="v">KSh {(ticketsSold / 100).toLocaleString("en-KE")}</div><div class="k">customer revenue</div></div>
-          <div class="stat"><div class="v">{today}</div><div class="k">paid today</div></div>
-          <div class="stat"><div class="v">{pending}</div><div class="k">pending / failed</div></div>
-          <div class="stat"><div class="v">{exceptions}</div><div class="k">reconcile open</div></div>
+      <StaffPage title="Staff dashboard" active="/staff">
+        <div class="page-head ops-head">
+          <p class="kicker">MnM Tickets · trading</p>
+          <h1>How the platform is doing.</h1>
+          <p class="lead">Signed in as <strong>{u.fullName}</strong> ({u.role}). Figures cover paid ticket orders; the juice bar has its own dashboard.</p>
+        </div>
+        <div class="ops-kpis">
+          <div class="ops-kpi is-hot">
+            <span class="k">Customer revenue</span>
+            <span class="v">KSh {(ticketsSold / 100).toLocaleString("en-KE")}</span>
+            <span class="meta">{totalPaid} paid orders all time</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">MnM commission</span>
+            <span class="v">KSh {(byEvent.reduce((s, e) => s + Number(e.mnm), 0) / 100).toLocaleString("en-KE")}</span>
+            <span class="meta">Earned on paid ticket sales</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">Paid today</span>
+            <span class="v">{today}</span>
+            <span class="meta">{pending} pending or failed</span>
+          </div>
+          <div class="ops-kpi">
+            <span class="k">Reconcile open</span>
+            <span class="v">{exceptions}</span>
+            <span class="meta">Items needing attention</span>
+          </div>
         </div>
         <h2>Sales by event</h2>
         <div class="panel">
@@ -74,7 +92,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
           <a class="btn btn-secondary" href="/staff/scan">Scan tickets</a>
           {roleAllows(u.role, "admin") ? <a class="btn btn-ghost" href="/admin">AD platform console</a> : null}
         </div>
-      </Page>,
+      </StaffPage>,
     );
   });
 
@@ -88,7 +106,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
         ORDER BY o.id DESC LIMIT 200`,
     ) as Record<string, unknown>[];
     return c.html(
-      <Page title="Orders">
+      <StaffPage title="Orders">
         <h1>Orders</h1>
         <div class="panel">
           <table>
@@ -105,6 +123,12 @@ export function staffAreaRoutes(config: AppConfig): Hono {
                   <td><span class={String(o.lifecycle) === "ticket_issued" ? "tag ok" : String(o.lifecycle) === "refunded" ? "tag danger" : "tag warn"}>{String(o.lifecycle)}</span></td>
                   <td>{new Date(String(o.created_at)).toLocaleString("en-KE", { dateStyle: "short", timeStyle: "short" })}</td>
                   <td>
+                    {String(o.lifecycle) === "refund_pending" && roleAllows(u.role, "manage") ? (
+                      <form method="post" action="/staff/orders/refund/complete" style="display:inline">
+                        <input type="hidden" name="order_ref" value={String(o.order_ref)} />
+                        <button class="btn btn-danger btn-sm" type="submit">Complete refund</button>
+                      </form>
+                    ) : null}
                     {(String(o.lifecycle) === "paid" || String(o.lifecycle) === "ticket_issued") && roleAllows(u.role, "manage") ? (
                       <form method="post" action="/staff/orders/refund" style="display:inline">
                         <input type="hidden" name="order_ref" value={String(o.order_ref)} />
@@ -118,7 +142,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
           </table>
         </div>
         <a class="btn btn-ghost" href="/staff/orders.csv">Export CSV</a>
-      </Page>,
+      </StaffPage>,
     );
   });
 
@@ -127,8 +151,15 @@ export function staffAreaRoutes(config: AppConfig): Hono {
     if (!u) return c.text("Forbidden", 403);
     const body = await c.req.parseBody();
     const ok = startRefund(String(body.order_ref ?? ""), u.id);
-    return c.redirect("/staff/orders");
-    void ok;
+    return c.redirect(ok ? "/staff/orders?refund=started" : "/staff/orders?refund=not_allowed");
+  });
+
+  app.post("/staff/orders/refund/complete", async (c) => {
+    const u = staff(c, config, "manage");
+    if (!u) return c.text("Forbidden", 403);
+    const body = await c.req.parseBody();
+    const ok = completeRefund(String(body.order_ref ?? ""), u.id);
+    return c.redirect(ok ? "/staff/orders?refund=completed" : "/staff/orders?refund=not_pending");
   });
 
   app.get("/staff/orders.csv", (c) => {
@@ -155,7 +186,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
     if (!u) return c.redirect("/staff/login?next=/staff/events");
     const events = queryAll("SELECT * FROM events ORDER BY id DESC") as Record<string, unknown>[];
     return c.html(
-      <Page title="Events & inventory">
+      <StaffPage title="Events & inventory">
         <h1>Events &amp; inventory</h1>
         <div class="panel">
           <h3>Create event (draft)</h3>
@@ -183,8 +214,13 @@ export function staffAreaRoutes(config: AppConfig): Hono {
         </div>
         {events.map((e) => {
           const cats = queryAll(
-            `SELECT id, name, original_price, quantity, sold_count,
-                    quantity - sold_count - COALESCE((SELECT SUM(qty) FROM reservations r WHERE r.category_id=tc.id AND r.status='active' AND r.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')),0) avail
+            `SELECT id, name, original_price, quantity,
+                    (SELECT COUNT(*) FROM tickets tk JOIN order_items oi ON oi.id=tk.order_item_id
+                      WHERE oi.category_id=tc.id AND tk.status IN ('valid','redeemed')) sold_count,
+                    quantity
+                    - COALESCE((SELECT COUNT(*) FROM tickets tk JOIN order_items oi ON oi.id=tk.order_item_id
+                                 WHERE oi.category_id=tc.id AND tk.status IN ('valid','redeemed')),0)
+                    - COALESCE((SELECT SUM(qty) FROM reservations r WHERE r.category_id=tc.id AND r.status='active' AND r.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')),0) avail
                FROM ticket_categories tc WHERE event_id=?`, [num(e.id)]) as Record<string, number>[];
           return (
             <div class="panel">
@@ -241,7 +277,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
             </div>
           );
         })}
-      </Page>,
+      </StaffPage>,
     );
   });
 
@@ -267,7 +303,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
     const ev = queryOne("SELECT authorization_ref FROM events WHERE id=?", [id]);
     if (!ev) return c.text("Not found", 404);
     if (!String(ev.authorization_ref).trim()) {
-      return c.html(<Page title="Blocked"><div class="panel notice bad">Cannot publish: no organiser authorisation recorded. Authorised resale requires documented permission. <a href="/staff/events">Back</a></div></Page>, 400);
+      return c.html(<StaffPage title="Blocked"><div class="panel notice bad">Cannot publish: no organiser authorisation recorded. Authorised resale requires documented permission. <a href="/staff/events">Back</a></div></StaffPage>, 400);
     }
     tx(() => {
       run("UPDATE events SET status='on_sale', authorized_by_user=?, authorized_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'), sale_starts_at=COALESCE(sale_starts_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id=? AND status='draft'", [u.id, id]);
@@ -281,9 +317,12 @@ export function staffAreaRoutes(config: AppConfig): Hono {
       const u = staff(c, config, "manage");
       if (!u) return c.text("Forbidden", 403);
       const b = await creqBody(c);
-      const status = action === "pause" ? "paused" : "cancelled";
-      run("UPDATE events SET status=? WHERE id=? AND status IN ('draft','on_sale','paused')", [status, Number(b.id)]);
-      run("INSERT INTO audit_log(actor_user,action,entity,entity_id,detail) VALUES (?,?,?,?,?)", [u.id, `event.${action}`, "events", String(b.id), "{}"]);
+      if (action === "cancel") {
+        const result = cancelEventAndQueueRefunds(Number(b.id), u.id);
+        return c.redirect(result.ok ? `/staff/events?cancelled=${result.refundPending}` : "/staff/events?cancel=not_allowed");
+      }
+      run("UPDATE events SET status='paused' WHERE id=? AND status IN ('draft','on_sale','paused')", [Number(b.id)]);
+      run("INSERT INTO audit_log(actor_user,action,entity,entity_id,detail) VALUES (?,?,?,?,?)", [u.id, "event.pause", "events", String(b.id), "{}"]);
       return c.redirect("/staff/events");
     });
   }
@@ -305,7 +344,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
     const ev = queryOne("SELECT title FROM events WHERE id=?", [id]);
     if (!ev) return c.text("Not found", 404);
     return c.html(
-      <Page title="Add ticket category">
+      <StaffPage title="Add ticket category">
         <div class="narrow">
           <div class="panel">
             <h1>Add ticket category</h1>
@@ -324,7 +363,7 @@ export function staffAreaRoutes(config: AppConfig): Hono {
             </form>
           </div>
         </div>
-      </Page>,
+      </StaffPage>,
     );
   });
 

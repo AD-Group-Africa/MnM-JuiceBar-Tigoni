@@ -143,6 +143,23 @@ export function roleAllows(role: Role, capability: Capability): boolean {
   return ROLE_CLEARANCE[role].includes(capability);
 }
 
+/**
+ * Canonical Kenyan phone form for matching staff accounts.
+ *
+ * Staff sign in with the phone number on file. The owner's number is displayed
+ * on the site as "+254 705 687 273", but the seed stores "+254705687273"; an
+ * exact string comparison therefore rejected perfectly valid credentials typed
+ * with the spaces the site itself shows. Normalising both sides fixes that
+ * without weakening the password check.
+ */
+export function normalisePhone(input: string): string {
+  const cleaned = String(input ?? "").trim().replace(/[\s().-]/g, "");
+  if (/^0[17]\d{8}$/.test(cleaned)) return `+254${cleaned.slice(1)}`;
+  if (/^254[17]\d{8}$/.test(cleaned)) return `+${cleaned}`;
+  if (/^\+254[17]\d{8}$/.test(cleaned)) return cleaned;
+  return cleaned;
+}
+
 // ---------- CSRF / origin check ----------
 
 /**

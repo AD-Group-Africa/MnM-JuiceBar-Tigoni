@@ -6,6 +6,7 @@
  */
 import { queryAll, queryOne, run, tx } from "./db.ts";
 import { formatMinor } from "./money.ts";
+import { hashToken, newOpaqueToken } from "./auth.ts";
 
 // ---------- product catalogue ----------
 
@@ -151,17 +152,112 @@ export interface CartTotals {
   totalMinor: number;
 }
 
-export function cartSubtotal(items: CartItem[]): number {
+export interface PricedJuiceLine {
+  productId: number;
+  productName: string;
+  sizeLabel: string | null;
+  sizePriceMinor: number;
+  addonsChosen: string[];
+  addonsPriceMinor: number;
+  qty: number;
+  unitPriceMinor: number;
+  lineTotalMinor: number;
+}
+
+export type JuiceCartPriceResult =
+  | { ok: true; lines: PricedJuiceLine[]; subtotalMinor: number }
+  | { ok: false; msg: string };
+
+function normaliseChoice(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * Authoritative cart pricing. Browser-supplied size/add-on *prices* are ignored;
+ * only configured labels are accepted, and their server-side prices are used.
+ */
+export function priceJuiceCart(items: CartItem[]): JuiceCartPriceResult {
+  if (!Array.isArray(items) || items.length === 0) return { ok: false, msg: "Cart cannot be empty." };
+  if (items.length > 50) return { ok: false, msg: "Too many line items in one order (max 50)." };
+
+  const lines: PricedJuiceLine[] = [];
   let subtotal = 0;
   for (const item of items) {
+    if (!Number.isInteger(item.productId) || item.productId < 1) {
+      return { ok: false, msg: "Unknown product in cart." };
+    }
+    if (!Number.isInteger(item.qty) || item.qty < 1 || item.qty > 99) {
+      return { ok: false, msg: "Each item must have a quantity between 1 and 99." };
+    }
+    if (item.sizePriceMinor !== undefined && (!Number.isInteger(item.sizePriceMinor) || item.sizePriceMinor < 0)) {
+      return { ok: false, msg: "Invalid size price in cart." };
+    }
+    if (item.addonsPriceMinor !== undefined && (!Number.isInteger(item.addonsPriceMinor) || item.addonsPriceMinor < 0)) {
+      return { ok: false, msg: "Invalid add-on price in cart." };
+    }
+
     const product = productById(item.productId);
-    if (!product || !product.available) continue;
-    const sizeExtra = item.sizePriceMinor ?? 0;
-    const addonsExtra = item.addonsPriceMinor ?? 0;
-    const unitPrice = product.priceMinor + sizeExtra + addonsExtra;
-    subtotal += unitPrice * item.qty;
+    if (!product) return { ok: false, msg: "Unknown product in cart." };
+    if (!product.available) return { ok: false, msg: `${product.name} is currently unavailable.` };
+
+    let sizeLabel: string | null = null;
+    let sizePriceMinor = 0;
+    if (item.sizeLabel !== undefined && item.sizeLabel !== null && String(item.sizeLabel).trim() !== "") {
+      if (typeof item.sizeLabel !== "string") return { ok: false, msg: `Invalid size selection for ${product.name}.` };
+      const selected = product.sizes.find((s) => normaliseChoice(s.label) === normaliseChoice(item.sizeLabel!));
+      if (selected) {
+        sizeLabel = selected.label;
+        sizePriceMinor = selected.priceMinor;
+      } else if (product.sizes.length === 0 && normaliseChoice(item.sizeLabel) === "standard") {
+        // Products without configured sizes are rendered as "Standard" by the cart UI.
+        sizeLabel = null;
+      } else {
+        return { ok: false, msg: `Invalid size selection for ${product.name}.` };
+      }
+    }
+
+    const rawAddons = item.addonsChosen ?? [];
+    if (!Array.isArray(rawAddons) || !rawAddons.every((a) => typeof a === "string")) {
+      return { ok: false, msg: `Invalid add-on selection for ${product.name}.` };
+    }
+    const addonsChosen: string[] = [];
+    const seen = new Set<string>();
+    let addonsPriceMinor = 0;
+    for (const raw of rawAddons) {
+      const key = normaliseChoice(raw);
+      if (seen.has(key)) return { ok: false, msg: `Duplicate add-on selection for ${product.name}.` };
+      seen.add(key);
+      const addon = product.addons.find((a) => normaliseChoice(a.name) === key);
+      if (!addon) return { ok: false, msg: `Add-on \"${raw}\" is not available for ${product.name}.` };
+      addonsChosen.push(addon.name);
+      addonsPriceMinor += addon.priceMinor;
+    }
+
+    const unitPriceMinor = product.priceMinor + sizePriceMinor + addonsPriceMinor;
+    const lineTotalMinor = unitPriceMinor * item.qty;
+    if (!Number.isSafeInteger(unitPriceMinor) || !Number.isSafeInteger(lineTotalMinor) || unitPriceMinor < 0) {
+      return { ok: false, msg: "Invalid order total." };
+    }
+    subtotal += lineTotalMinor;
+    if (!Number.isSafeInteger(subtotal)) return { ok: false, msg: "Invalid order total." };
+    lines.push({
+      productId: product.id,
+      productName: product.name,
+      sizeLabel,
+      sizePriceMinor,
+      addonsChosen,
+      addonsPriceMinor,
+      qty: item.qty,
+      unitPriceMinor,
+      lineTotalMinor,
+    });
   }
-  return subtotal;
+  return { ok: true, lines, subtotalMinor: subtotal };
+}
+
+export function cartSubtotal(items: CartItem[]): number {
+  const priced = priceJuiceCart(items);
+  return priced.ok ? priced.subtotalMinor : 0;
 }
 
 export function deliveryZoneById(id: number): DeliveryZone | null {
@@ -178,7 +274,6 @@ export function computeJuiceOrderTotals(items: CartItem[], deliveryZoneId?: numb
   if (deliveryZoneId) {
     const zone = deliveryZoneById(deliveryZoneId);
     if (zone) {
-      // Apply minimum-order rule: if below minimum, fee is still charged but flagged; customer sees it.
       deliveryFee = zone.feeMinor;
     }
   }
@@ -310,6 +405,19 @@ export function juiceOrderByRef(ref: string): JuiceOrder | null {
   return order;
 }
 
+/** Guest access token for a juice order: raw returned once, only hash stored. */
+export function issueJuiceOrderToken(orderId: number): string {
+  const raw = newOpaqueToken();
+  run("UPDATE juice_orders SET access_token_hash=? WHERE id=?", [hashToken(raw), orderId]);
+  return raw;
+}
+
+export function checkJuiceOrderAccess(orderRef: string, token: string): boolean {
+  if (!orderRef || !token) return false;
+  const row = queryOne("SELECT access_token_hash FROM juice_orders WHERE order_ref=?", [orderRef]);
+  return !!row && Boolean(row.access_token_hash) && String(row.access_token_hash) === hashToken(token);
+}
+
 export function createJuiceOrder(params: {
   items: CartItem[];
   type: "pickup" | "delivery";
@@ -324,39 +432,14 @@ export function createJuiceOrder(params: {
   deliveryInstructions?: string;
   customerNotes?: string;
   assignedStaffId?: number;
-}): { ok: boolean; orderId?: number; orderRef?: string; msg?: string } {
+}): { ok: boolean; orderId?: number; orderRef?: string; accessToken?: string; msg?: string } {
   const { items, type, customerName, customerPhone, customerEmail, pickupName, pickupInstructions, deliveryZoneId, deliveryAddress, deliveryContact, deliveryInstructions, customerNotes, assignedStaffId } = params;
 
   if (!customerName.trim() || !customerPhone.trim()) return { ok: false, msg: "Customer name and phone are required." };
-  if (items.length === 0) return { ok: false, msg: "Cart cannot be empty." };
-  if (items.length > 50) return { ok: false, msg: "Too many line items in one order (max 50)." };
 
-  // Validate quantities and client-supplied price extras BEFORE any pricing maths:
-  // qty must be a positive integer; price extras must be non-negative integers (minor units).
-  for (const item of items) {
-    if (!Number.isInteger(item.qty) || item.qty < 1 || item.qty > 99) {
-      return { ok: false, msg: "Each item must have a quantity between 1 and 99." };
-    }
-    if (item.sizePriceMinor !== undefined && (!Number.isInteger(item.sizePriceMinor) || item.sizePriceMinor < 0)) {
-      return { ok: false, msg: "Invalid size price in cart." };
-    }
-    if (item.addonsPriceMinor !== undefined && (!Number.isInteger(item.addonsPriceMinor) || item.addonsPriceMinor < 0)) {
-      return { ok: false, msg: "Invalid add-on price in cart." };
-    }
-  }
-
-  const productIds = items.map((i) => i.productId);
-  const products = productIds.map((id) => productById(id)).filter(Boolean) as Product[];
-  const productMap = new Map(products.map((p) => [p.id, p]));
-
-  // Validate every item exists, is available, and stock (if tracked) allows it.
-  for (const item of items) {
-    const product = productMap.get(item.productId);
-    if (!product) return { ok: false, msg: `Unknown product in cart.` };
-    if (!product.available) return { ok: false, msg: `${product.name} is currently unavailable.` };
-  }
-
-  const subtotal = cartSubtotal(items);
+  const priced = priceJuiceCart(items);
+  if (!priced.ok) return { ok: false, msg: priced.msg };
+  const subtotal = priced.subtotalMinor;
   let deliveryFee = 0;
   if (type === "delivery") {
     // A delivery order must name a real, enabled zone — never accept a missing,
@@ -364,6 +447,12 @@ export function createJuiceOrder(params: {
     if (!deliveryZoneId || !Number.isInteger(deliveryZoneId)) return { ok: false, msg: "Please choose a delivery zone." };
     const zone = deliveryZoneById(deliveryZoneId);
     if (!zone || !zone.enabled) return { ok: false, msg: "Selected delivery zone is not available." };
+    if (zone.minOrderMinor > 0 && subtotal < zone.minOrderMinor) {
+      return {
+        ok: false,
+        msg: `Minimum delivery order is ${formatMinor(zone.minOrderMinor, "KES")}. Add ${formatMinor(zone.minOrderMinor - subtotal, "KES")} more, or choose pickup.`,
+      };
+    }
     deliveryFee = zone.feeMinor;
   }
   const total = Math.max(0, subtotal + deliveryFee);
@@ -402,27 +491,24 @@ export function createJuiceOrder(params: {
         ],
       );
       const orderId = queryOne("SELECT last_insert_rowid() AS id")!.id as number;
+      const accessToken = newOpaqueToken();
+      run("UPDATE juice_orders SET access_token_hash=? WHERE id=?", [hashToken(accessToken), orderId]);
 
-      // Insert items
-      for (const item of items) {
-        const product = productMap.get(item.productId)!;
-        const sizePrice = item.sizePriceMinor ?? 0;
-        const addonsPrice = item.addonsPriceMinor ?? 0;
-        const unitPrice = product.priceMinor + sizePrice + addonsPrice;
-        const lineTotal = unitPrice * item.qty;
+      // Insert server-priced items. Client price fields are never persisted.
+      for (const line of priced.lines) {
         run(
           `INSERT INTO juice_order_items(juice_order_id, product_id, size_label, size_price_minor, addons_chosen, addons_price_minor, qty, unit_price_minor, line_total_minor)
            VALUES (?,?,?,?,?,?,?,?,?)`,
           [
             orderId,
-            item.productId,
-            item.sizeLabel || null,
-            sizePrice || null,
-            JSON.stringify(item.addonsChosen || []) || null,
-            addonsPrice || null,
-            item.qty,
-            unitPrice,
-            lineTotal,
+            line.productId,
+            line.sizeLabel,
+            line.sizePriceMinor || null,
+            line.addonsChosen.length ? JSON.stringify(line.addonsChosen) : null,
+            line.addonsPriceMinor || null,
+            line.qty,
+            line.unitPriceMinor,
+            line.lineTotalMinor,
           ],
         );
       }
@@ -431,7 +517,7 @@ export function createJuiceOrder(params: {
       run("INSERT INTO audit_log(actor_user, action, entity, entity_id, detail) VALUES (?,?,?,?,?)",
         [assignedStaffId || null, "juice_order.create", "juice_orders", String(orderId), JSON.stringify({ ref: orderRef, type, itemCount: items.length, total })]);
 
-      return { ok: true, orderId, orderRef };
+      return { ok: true, orderId, orderRef, accessToken };
     });
   } catch (e) {
     console.error("[juice] create order error:", e);

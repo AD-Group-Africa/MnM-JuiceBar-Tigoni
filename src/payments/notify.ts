@@ -10,6 +10,7 @@ export function parseDarajaNotify(raw: string): ParsedNotify | null {
   if (!d) return null;
   return {
     providerRequestId: d.providerRequestId,
+    merchantRequestId: d.merchantRequestId,
     outcome: d.outcome,
     amountMinor: d.amountMinor,
     currency: "KES",

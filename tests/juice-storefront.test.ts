@@ -15,6 +15,7 @@ import path from "node:path";
 
 process.env.NODE_ENV = "test";
 process.env.APP_SECRET_KEY = "test-secret-please-ignore-0123456789abcdef";
+process.env.PAYMENT_PROVIDER = "dev";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mnm-juice-s2-"));
 process.env.DATABASE_FILE = path.join(tmp, "juice.sqlite");
 
@@ -48,7 +49,7 @@ before(async () => {
     [categoryId, FIXTURE_SKU, FIXTURE_PRICE_MINOR, OWNER_ID],
   ).lastInsertRowid);
   zoneId = Number(run(
-    "INSERT INTO delivery_zones(name, description, fee_minor, min_order_minor, enabled, sort_order) VALUES ('Tigoni test zone', 'Test area', ?, 30000, 1, 1)",
+    "INSERT INTO delivery_zones(name, description, fee_minor, min_order_minor, enabled, sort_order) VALUES ('Tigoni test zone', 'Test area', ?, 0, 1, 1)",
     [ZONE_FEE_MINOR],
   ).lastInsertRowid);
   reviewId = Number(run(
@@ -552,7 +553,7 @@ test("disabled zones are rejected at checkout and never produce NaN totals", asy
 
 test("zone fee flows into checkout totals; invalid zone references are refused", async () => {
   // Re-enable the fixture zone with a known fee.
-  run("UPDATE delivery_zones SET enabled=1, fee_minor=5000 WHERE id=?", [String(zoneId)]);
+  run("UPDATE delivery_zones SET enabled=1, fee_minor=5000, min_order_minor=0 WHERE id=?", [String(zoneId)]);
 
   const valid = await rawReq("POST", "/juice/checkout", new URLSearchParams({
     items: JSON.stringify([{ productId, qty: 1 }]),
@@ -563,7 +564,7 @@ test("zone fee flows into checkout totals; invalid zone references are refused",
     deliveryAddress: "Fee Street",
   }), "");
   assert.equal(valid.status, 302);
-  const ref = decodeURIComponent(valid.headers.get("location")!.split("/").pop()!);
+  const ref = decodeURIComponent(new URL(valid.headers.get("location")!, BASE).pathname.split("/").pop()!);
   const row = queryOne("SELECT * FROM juice_orders WHERE order_ref=?", [ref]) as Record<string, unknown>;
   assert.equal(row.subtotal_minor, fixturePrice());
   assert.equal(row.delivery_fee_minor, ZONE_FEE_MINOR);
@@ -604,7 +605,8 @@ test("checkout: valid pickup order creates an unpaid order and confirmation rend
   const location = res.headers.get("location")!;
   assert.ok(location.startsWith("/juice/order/"), "redirects to the order confirmation");
 
-  const ref = decodeURIComponent(location.split("/").pop()!);
+  const confirmationUrl = new URL(location, BASE);
+  const ref = decodeURIComponent(confirmationUrl.pathname.split("/").pop()!);
   const row = queryOne("SELECT * FROM juice_orders WHERE order_ref=?", [ref]) as Record<string, unknown>;
   assert.ok(row, "order persists");
   assert.equal(row.status, "new");
@@ -612,9 +614,21 @@ test("checkout: valid pickup order creates an unpaid order and confirmation rend
   assert.equal(row.total_minor, fixturePrice() * 2);
   assert.notEqual(ref, "", "order reference is present");
 
-  const page = await app.request(new URL(location, BASE).toString());
+  const page = await app.request(confirmationUrl.toString());
   assert.equal(page.status, 200);
   assert.ok((await page.text()).includes(ref), "confirmation page shows the reference");
+
+  const noToken = await app.request(new URL(`/juice/order/${encodeURIComponent(ref)}`, BASE).toString());
+  assert.equal(noToken.status, 403, "order details require the private link");
+
+  const wrongPhone = await rawReq("POST", "/juice/order/lookup", new URLSearchParams({ ref, phone: "+254700000000" }), "");
+  assert.equal(wrongPhone.status, 404, "lookup requires the checkout phone");
+
+  const lookup = await rawReq("POST", "/juice/order/lookup", new URLSearchParams({ ref, phone: "+254766666666" }), "");
+  assert.equal(lookup.status, 302);
+  const reopened = await app.request(new URL(lookup.headers.get("location")!, BASE).toString());
+  assert.equal(reopened.status, 200);
+  assert.ok((await reopened.text()).includes(ref), "reference + phone reopens the order with a fresh token");
 });
 
 test("checkout: repeated identical submissions create distinct orders with unique references", async () => {
@@ -628,8 +642,8 @@ test("checkout: repeated identical submissions create distinct orders with uniqu
   const b = await submit();
   assert.equal(a.status, 302);
   assert.equal(b.status, 302);
-  const refA = decodeURIComponent(a.headers.get("location")!.split("/").pop()!);
-  const refB = decodeURIComponent(b.headers.get("location")!.split("/").pop()!);
+  const refA = decodeURIComponent(new URL(a.headers.get("location")!, BASE).pathname.split("/").pop()!);
+  const refB = decodeURIComponent(new URL(b.headers.get("location")!, BASE).pathname.split("/").pop()!);
   assert.notEqual(refA, refB, "each submission gets a unique reference (no idempotency key in v1)");
   const count = (queryOne("SELECT COUNT(*) AS n FROM juice_orders WHERE order_ref IN (?,?)", [refA, refB]) as { n: number }).n;
   assert.equal(count, 2);
@@ -712,4 +726,46 @@ test("checkout: cross-origin and origin-less submissions are refused", async () 
 test("checkout: no juice order is ever marked paid without provider verification", async () => {
   const paid = queryAll("SELECT id FROM juice_orders WHERE payment_status IS NOT NULL");
   assert.equal(paid.length, 0, "payment_status must stay NULL until a verified provider callback settles it");
+});
+
+test("checkout: server recomputes size and add-on prices and rejects unknown options", async () => {
+  const pid = Number(run(
+    `INSERT INTO products(category_id, sku, name, description, price_minor, available, featured, bestseller, sizes, addons, created_by)
+     VALUES (?, 'S2-AUTHORITATIVE', 'Authoritative smoothie', 'Pricing test', 10000, 1, 0, 0, ?, ?, ?)`,
+    [categoryId, JSON.stringify([{ label: "Large", price_minor: 5000 }]), JSON.stringify([{ name: "Protein", price_minor: 3000 }]), OWNER_ID],
+  ).lastInsertRowid);
+
+  const before = (queryOne("SELECT COUNT(*) AS n FROM juice_orders") as { n: number }).n;
+  const tampered = createJuiceOrder({
+    items: [{ productId: pid, qty: 1, sizeLabel: "Large", sizePriceMinor: 0, addonsChosen: ["Protein"], addonsPriceMinor: 0 }],
+    type: "pickup", customerName: "Price Tester", customerPhone: "+254788888889",
+  });
+  assert.equal(tampered.ok, true, tampered.msg);
+  const order = queryOne("SELECT subtotal_minor, total_minor FROM juice_orders WHERE id=?", [String(tampered.orderId)]) as Record<string, unknown>;
+  assert.equal(Number(order.subtotal_minor), 18_000, "base 100 + size 50 + protein 30");
+  assert.equal(Number(order.total_minor), 18_000);
+  const item = queryOne("SELECT * FROM juice_order_items WHERE juice_order_id=?", [String(tampered.orderId)]) as Record<string, unknown>;
+  assert.equal(item.size_price_minor, 5000);
+  assert.equal(item.addons_price_minor, 3000);
+  assert.equal(item.unit_price_minor, 18_000);
+  assert.equal(item.line_total_minor, 18_000);
+  assert.equal(item.size_label, "Large");
+  assert.deepEqual(JSON.parse(String(item.addons_chosen)), ["Protein"]);
+
+  const badAddon = createJuiceOrder({
+    items: [{ productId: pid, qty: 1, addonsChosen: ["Gold leaf"] }],
+    type: "pickup", customerName: "Bad Addon", customerPhone: "+254788888889",
+  });
+  assert.equal(badAddon.ok, false);
+  assert.match(badAddon.msg ?? "", /not available/);
+
+  const badSize = createJuiceOrder({
+    items: [{ productId: pid, qty: 1, sizeLabel: "Huge" }],
+    type: "pickup", customerName: "Bad Size", customerPhone: "+254788888889",
+  });
+  assert.equal(badSize.ok, false);
+  assert.match(badSize.msg ?? "", /Invalid size/);
+
+  const after = (queryOne("SELECT COUNT(*) AS n FROM juice_orders") as { n: number }).n;
+  assert.equal(after, before + 1, "only the valid order may be persisted");
 });

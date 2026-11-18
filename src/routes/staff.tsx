@@ -9,10 +9,10 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import type { Context, Next } from "hono";
 import type { AppConfig } from "../config.ts";
-import { queryOne } from "../db.ts";
+import { queryAll } from "../db.ts";
 import {
   SESSION_COOKIE, clearSessionCookie, createSession, destroySession, getSessionUser,
-  hashPassword, newSessionToken, roleAllows, setSessionCookie, stateChangeOriginAllowed,
+  hashPassword, newSessionToken, normalisePhone, roleAllows, setSessionCookie, stateChangeOriginAllowed,
   verifyPassword, type Capability, type SessionUser,
 } from "../auth.ts";
 import { newCsrfToken } from "../ids.ts";
@@ -49,24 +49,43 @@ export function authRoutes(config: AppConfig): Hono {
 
   app.get("/staff/login", (c) =>
     c.html(
-      <Page title="Staff sign-in">
-        <div class="narrow">
-          <div class="panel">
-            <h1>Staff sign-in</h1>
-            <p class="muted">For MnM Juice Bar staff, gate scanners and Afrika Digitalis administrators.</p>
-            {c.req.query("next") ? null : null}
-            <form method="post" action="/staff/login">
-              <input type="hidden" name="next" value={c.req.query("next") ?? "/staff"} />
-              <div class="field">
-                <label for="phone">Staff phone</label>
-                <input id="phone" name="phone" type="tel" required autocomplete="tel" placeholder="+2547…" />
+      <Page title="Sign in" chrome="plain">
+        <div class="auth-shell">
+          <aside class="auth-brand">
+            <a class="auth-brand-mark" href="/" aria-label="MnM Juice Bar home">
+              <span class="brand-mark">M&amp;M</span>
+              <span class="brand-sub">Juice Bar<small class="brand-sub-locale">Tigoni</small></span>
+            </a>
+            <div class="auth-brand-copy">
+              <p class="kicker">MnM operations</p>
+              <h1 class="display">Good service starts<br /><em>behind the counter.</em></h1>
+              <p class="auth-brand-sub">Orders, tickets, scanning and trading — one place for the MnM team.</p>
+            </div>
+            <p class="auth-brand-foot">MnM Juice Bar · Tigoni, Limuru<br /><small>Authorised staff only. Sessions expire after 12 hours.</small></p>
+          </aside>
+
+          <div class="auth-panel">
+            <div class="auth-card">
+              <p class="kicker">Team access</p>
+              <h2>Sign in</h2>
+              <p class="muted small">Use the phone number and password issued to you by the owner.</p>
+              <form method="post" action="/staff/login" class="auth-form">
+                <input type="hidden" name="next" value={c.req.query("next") ?? "/staff"} />
+                <div class="field">
+                  <label for="phone">Phone number</label>
+                  <input id="phone" name="phone" type="tel" required autocomplete="tel" inputmode="tel" placeholder="+254 705 687 273" />
+                </div>
+                <div class="field">
+                  <label for="password">Password</label>
+                  <input id="password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••" />
+                </div>
+                <button class="btn btn-primary btn-block btn-lg" type="submit">Sign in</button>
+              </form>
+              <div class="auth-help">
+                <p><strong>Can't get in?</strong> Check the number is the one registered for your account, then ask the owner to reset your password.</p>
+                <p><a href="/">← Back to MnM Juice Bar</a></p>
               </div>
-              <div class="field">
-                <label for="password">Password</label>
-                <input id="password" name="password" type="password" required autocomplete="current-password" />
-              </div>
-              <button class="btn btn-primary btn-block" type="submit">Sign in</button>
-            </form>
+            </div>
           </div>
         </div>
       </Page>,
@@ -82,18 +101,22 @@ export function authRoutes(config: AppConfig): Hono {
     const password = String(form.password ?? "");
     const next = String(form.next ?? "/staff");
 
-    if (rateLimited(ip, phone)) {
+    const wanted = normalisePhone(phone);
+    if (rateLimited(ip, wanted)) {
       return c.html(<Page title="Too many attempts"><div class="panel notice bad">Too many sign-in attempts. Try again in a few minutes.</div></Page>, 429);
     }
-    const user = queryOne("SELECT id, full_name, role, password_hash, is_active FROM users WHERE phone = ?", [phone]);
+    // Match on the canonical form so "+254 705 687 273" (as displayed on the
+    // site) and "+254705687273" (as stored) resolve to the same account.
+    const user = queryAll("SELECT id, full_name, role, password_hash, is_active, phone FROM users")
+      .find((u) => normalisePhone(String(u.phone)) === wanted);
     const ok = !!user && Number(user.is_active) === 1 && await verifyPassword(password, String(user.password_hash));
     if (!ok) {
-      recordFail(ip, phone);
+      recordFail(ip, wanted);
       // Burn a constant amount of work to blunt timing/enum differences.
       await fixedHash("spare-work");
       return c.html(<Page title="Sign-in failed"><div class="narrow"><div class="panel notice bad">Wrong phone or password.</div></div></Page>, 401);
     }
-    successClear(ip, phone);
+    successClear(ip, wanted);
     const token = newSessionToken();
     createSession(Number(user!.id), ip, token);
     setSessionCookie(c, token, config);

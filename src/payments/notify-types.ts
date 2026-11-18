@@ -1,5 +1,6 @@
 export interface ParsedNotify {
   providerRequestId: string;
+  merchantRequestId?: string;
   outcome: "succeeded" | "failed" | "expired";
   amountMinor?: number;
   currency?: string;

@@ -55,7 +55,22 @@ export class DarajaProvider implements PaymentProvider {
 
   /** Initiate an STK push. Returns the CheckoutRequestID used as idempotency key. */
   async initiate(orderId: number, amountMinor: number, currency: string, msisdn: string): Promise<InitiateResult> {
-    if (currency !== "KES") throw new Error(`daraja: unsupported currency ${currency}`);
+    if (currency !== "KES") return { ok: false, providerRequestId: null, status: "unavailable", msg: `daraja: unsupported currency ${currency}` };
+    // Daraja STK Push accepts whole KES only and a minimum of KES 1. Refuse
+    // fractional totals rather than silently rounding up (which would overcharge
+    // and make the callback amount impossible to reconcile). Pricing policy is an
+    // owner decision; this guard is fail-closed until then.
+    if (!Number.isInteger(amountMinor) || amountMinor < 100 || amountMinor % 100 !== 0) {
+      return { ok: false, providerRequestId: null, status: "unavailable", msg: "M-Pesa supports whole Kenyan shillings only; this total cannot be charged safely." };
+    }
+    try {
+      return await this.initiateWholeShilling(orderId, amountMinor, msisdn);
+    } catch (err) {
+      return { ok: false, providerRequestId: null, status: "unavailable", msg: `daraja initiation failed: ${(err as Error).message}` };
+    }
+  }
+
+  private async initiateWholeShilling(orderId: number, amountMinor: number, msisdn: string): Promise<InitiateResult> {
     const [token] = await Promise.all([this.accessToken()]);
     const ts = this.timestamp();
     const password = Buffer.from(`${this.config.mpesa.shortcode}${this.config.mpesa.passkey}${ts}`).toString("base64");
@@ -65,7 +80,7 @@ export class DarajaProvider implements PaymentProvider {
       Password: password,
       Timestamp: ts,
       TransactionType: "CustomerPayBillOnline",
-      Amount: Math.round(amountMinor / 100), // Daraja takes whole KES
+      Amount: amountMinor / 100, // validated whole KES above
       PartyA: msisdn.replace(/^\+/, ""),
       PartyB: this.config.mpesa.shortcode,
       PhoneNumber: msisdn.replace(/^\+/, ""),
@@ -82,7 +97,53 @@ export class DarajaProvider implements PaymentProvider {
     if (!res.ok || body.ResponseCode !== "0") {
       return { ok: false, providerRequestId: null, status: "unavailable", msg: `daraja stk push failed: HTTP ${res.status} ${JSON.stringify(body).slice(0, 200)}` };
     }
-    return { ok: true, providerRequestId: String(body.CheckoutRequestID), status: "initiated" };
+    return {
+      ok: true,
+      providerRequestId: String(body.CheckoutRequestID),
+      merchantRequestId: body.MerchantRequestID ? String(body.MerchantRequestID) : null,
+      status: "initiated",
+    };
+  }
+
+  /**
+   * Official Daraja STK Push Query. Daraja callbacks are not cryptographically
+   * signed, so a callback is never trusted on its own: the server asks Safaricom
+   * whether the CheckoutRequestID actually completed before settling anything.
+   * Returns reachable=false for transport/config failures; callers must retry or
+   * leave the transaction pending rather than treating it as paid or failed.
+   */
+  async verifyTransaction(checkoutRequestId: string): Promise<{ reachable: boolean; paid: boolean; detail: string }> {
+    try {
+      const token = await this.accessToken();
+      const ts = this.timestamp();
+      const password = Buffer.from(`${this.config.mpesa.shortcode}${this.config.mpesa.passkey}${ts}`).toString("base64");
+      const res = await fetch(`${this.baseUrl()}/mpesa/stkpushquery/v1/query`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          BusinessShortCode: this.config.mpesa.shortcode,
+          Password: password,
+          Timestamp: ts,
+          CheckoutRequestID: checkoutRequestId,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok || body.errorCode) {
+        return { reachable: false, paid: false, detail: `query failed: HTTP ${res.status} ${String(body.errorMessage ?? "")}`.trim() };
+      }
+      const responseCode = String(body.ResponseCode ?? "");
+      const resultCode = String(body.ResultCode ?? "");
+      if (responseCode && responseCode !== "0") {
+        return { reachable: false, paid: false, detail: `query rejected: ${responseCode} ${String(body.ResponseDescription ?? "")}`.trim() };
+      }
+      return {
+        reachable: true,
+        paid: resultCode === "0",
+        detail: `ResultCode=${resultCode || "unknown"} ${String(body.ResultDesc ?? "")}`.trim(),
+      };
+    } catch (err) {
+      return { reachable: false, paid: false, detail: (err as Error).message };
+    }
   }
 }
 
@@ -99,6 +160,7 @@ export interface DarajaCallback {
 
 export function parseDarajaCallback(raw: string): {
   providerRequestId: string;
+  merchantRequestId?: string;
   outcome: "succeeded" | "failed";
   amountMinor?: number;
   msisdn?: string;
@@ -118,6 +180,7 @@ export function parseDarajaCallback(raw: string): {
     for (const it of cb.CallbackMetadata?.Item ?? []) items.set(it.Name, it.Value);
     return {
       providerRequestId: cb.CheckoutRequestID,
+      merchantRequestId: cb.MerchantRequestID ? String(cb.MerchantRequestID) : undefined,
       outcome: "succeeded",
       amountMinor: Math.round(Number(items.get("Amount")) * 100),
       msisdn: items.get("PhoneNumber") ? String(items.get("PhoneNumber")) : undefined,
@@ -127,6 +190,7 @@ export function parseDarajaCallback(raw: string): {
   }
   return {
     providerRequestId: cb.CheckoutRequestID,
+    merchantRequestId: cb.MerchantRequestID ? String(cb.MerchantRequestID) : undefined,
     outcome: "failed",
     resultCode: cb.ResultCode,
   };

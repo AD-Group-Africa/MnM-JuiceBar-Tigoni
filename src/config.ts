@@ -44,7 +44,12 @@ function loadDotEnv(): void {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   loadDotEnv();
-  const nodeEnv = (env.NODE_ENV ?? "development") as AppConfig["env"];
+  const rawNodeEnv = (env.NODE_ENV ?? "development").trim().toLowerCase();
+  if (!["development", "test", "production"].includes(rawNodeEnv)) {
+    throw new Error(`[config] NODE_ENV must be development, test or production; got "${rawNodeEnv}".`);
+  }
+  const nodeEnv: AppConfig["env"] = rawNodeEnv === "production" ? "production" : "development";
+  const isProduction = rawNodeEnv === "production";
   const appSecretKey = env.APP_SECRET_KEY ?? "";
   if (appSecretKey.length < 32 || /^(change-me|dev-secret)/i.test(appSecretKey)) {
     if (nodeEnv === "production") {
@@ -57,24 +62,70 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const databaseFile = env.DATABASE_FILE ?? "data/mnm-dev.sqlite";
   fs.mkdirSync(path.dirname(path.resolve(databaseFile)), { recursive: true });
 
-  const provider = env.PAYMENT_PROVIDER === "daraja" ? "daraja" : "dev";
-  const mpesaEnv = env.MPESA_ENV === "production" ? "production" : "sandbox";
-  if (provider === "daraja" && nodeEnv === "production") {
+  // Local development is reached through several equivalent loopback names
+  // (localhost, 127.0.0.1, [::1]). The Origin check compares exact hosts, so a
+  // browser opened at http://127.0.0.1:8787 used to be rejected as "invalid
+  // request origin" when PUBLIC_ORIGINS only listed http://localhost:8787.
+  // Expand loopback aliases outside production; production stays exact.
+  const configuredOrigins = (env.PUBLIC_ORIGINS ?? "http://localhost:8787")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const publicOrigins = nodeEnv === "production"
+    ? configuredOrigins
+    : withLoopbackAliases(configuredOrigins);
+
+  // Payment selection is deliberately explicit and fail-closed. A missing or
+  // misspelled value must never silently select the development simulator.
+  const rawProvider = (env.PAYMENT_PROVIDER ?? "").trim().toLowerCase();
+  if (!rawProvider) {
+    throw new Error("[config] PAYMENT_PROVIDER is required. Use 'dev' only for local simulation or 'daraja' for live M-Pesa.");
+  }
+  if (rawProvider !== "dev" && rawProvider !== "daraja") {
+    throw new Error(`[config] Unknown PAYMENT_PROVIDER "${rawProvider}". Expected 'dev' or 'daraja'.`);
+  }
+  const provider: AppConfig["paymentProvider"] = rawProvider;
+  if (isProduction && provider !== "daraja") {
+    throw new Error("[config] PAYMENT_PROVIDER=dev is not allowed in production. Configure 'daraja' with live credentials.");
+  }
+
+  const rawMpesaEnv = (env.MPESA_ENV ?? "sandbox").trim().toLowerCase();
+  if (rawMpesaEnv !== "sandbox" && rawMpesaEnv !== "production") {
+    throw new Error(`[config] MPESA_ENV must be 'sandbox' or 'production'; got "${rawMpesaEnv}".`);
+  }
+  const mpesaEnv = rawMpesaEnv;
+  if (provider === "daraja") {
     const missing = ["MPESA_SHORTCODE", "MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET", "MPESA_PASSKEY", "MPESA_CALLBACK_BASE"].filter(
       (k) => !env[k],
     );
     if (missing.length) {
       throw new Error(
-        `[config] PAYMENT_PROVIDER=daraja in production but missing required credentials: ${missing.join(", ")}. Set all five env vars or switch PAYMENT_PROVIDER=dev to use the simulator.`,
+        `[config] PAYMENT_PROVIDER=daraja but missing required credentials: ${missing.join(", ")}. Set all five env vars or explicitly use PAYMENT_PROVIDER=dev for local simulation.`,
       );
     }
+    if (isProduction && mpesaEnv !== "production") {
+      throw new Error("[config] MPESA_ENV=sandbox is not allowed in production. Set MPESA_ENV=production with live Daraja credentials.");
+    }
+    if (isProduction) {
+      const callbackBase = String(env.MPESA_CALLBACK_BASE ?? "").trim();
+      if (!/^https:\/\//i.test(callbackBase) || /(^|\/\/)(localhost|127\.0\.0\.1|\[::1\])(:|\(\/|$)/i.test(callbackBase)) {
+        throw new Error("[config] MPESA_CALLBACK_BASE must be a public HTTPS URL in production.");
+      }
+    }
+  }
+  const forceRaw = (env.PAYMENT_DEV_FORCE_STATUS ?? "").trim().toLowerCase();
+  if (forceRaw && forceRaw !== "success" && forceRaw !== "failure") {
+    throw new Error(`[config] PAYMENT_DEV_FORCE_STATUS must be empty, 'success' or 'failure'; got "${forceRaw}".`);
+  }
+  if (provider !== "dev" && forceRaw) {
+    throw new Error("[config] PAYMENT_DEV_FORCE_STATUS is only valid with PAYMENT_PROVIDER=dev.");
   }
 
   return {
     env: nodeEnv,
     port: Number(env.PORT ?? 8787) || 8787,
     bindHost: env.BIND_HOST ?? "127.0.0.1",
-    publicOrigins: (env.PUBLIC_ORIGINS ?? "http://localhost:8787").split(",").map((s) => s.trim()).filter(Boolean),
+    publicOrigins,
     appSecretKey: appSecretKey.length >= 32
       ? Buffer.from(appSecretKey, "hex").length === appSecretKey.length / 2
         ? Buffer.from(appSecretKey, "hex")
@@ -82,7 +133,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       : Buffer.from(`dev-${Math.random()}`, "utf8"),
     databaseFile,
     paymentProvider: provider,
-    paymentDevForceStatus: (env.PAYMENT_DEV_FORCE_STATUS ?? "") as AppConfig["paymentDevForceStatus"],
+    paymentDevForceStatus: forceRaw as AppConfig["paymentDevForceStatus"],
     mpesa: {
       env: mpesaEnv,
       shortcode: env.MPESA_SHORTCODE ?? "",
@@ -97,6 +148,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       notifyFrom: env.NOTIFY_FROM ?? "tickets@localhost",
     },
   };
+}
+
+/** Add localhost/127.0.0.1/[::1] equivalents for any loopback origin (dev only). */
+function withLoopbackAliases(origins: string[]): string[] {
+  const out = new Set(origins);
+  for (const entry of origins) {
+    try {
+      const u = new URL(entry);
+      if (!["localhost", "127.0.0.1", "[::1]", "::1"].includes(u.hostname)) continue;
+      for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
+        const alias = new URL(entry);
+        alias.hostname = host;
+        out.add(alias.origin);
+      }
+    } catch {
+      // Ignore malformed entries; loadConfig already surfaces usable defaults.
+    }
+  }
+  return [...out];
 }
 
 export const isDev = (c: AppConfig) => c.env === "development";

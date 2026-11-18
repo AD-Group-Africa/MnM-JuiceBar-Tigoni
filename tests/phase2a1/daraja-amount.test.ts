@@ -2,8 +2,9 @@
  * Phase 2A.1 — Daraja amount consistency (known-defect suite).
  *
  * No OAuth/STK/Query network request leaves the process. fetch is replaced with
- * deterministic fakes. The fractional-KES tests are expected to FAIL until the
- * founder selects and Phase 2B implements a rounding policy.
+ * deterministic fakes. Fractional KES is now REFUSED before initiation: Daraja
+ * accepts whole shillings only, so silently rounding would overcharge and make
+ * reconciliation impossible. Whole-shilling orders continue to work.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -75,26 +76,27 @@ async function withMockFetch<T>(
   try { return await fn(); } finally { globalThis.fetch = original; }
 }
 
-test("fractional-KES order: STK Amount must equal the payable amount", async () => {
-  const captured: { stk?: Record<string, unknown> } = {};
-  await withMockFetch(async (url, init) => {
+test("fractional-KES order: provider refuses instead of silently rounding", async () => {
+  let stkCalls = 0;
+  await withMockFetch(async (url) => {
     if (url.includes("/oauth/")) {
       return new Response(JSON.stringify({ access_token: "mock-token", expires_in: "3599" }), { status: 200 });
     }
     if (url.includes("/stkpush/")) {
-      captured.stk = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ ResponseCode: "0", CheckoutRequestID: "CHECK-AMOUNT", MerchantRequestID: "MERCHANT-AMOUNT" }), { status: 200 });
+      stkCalls++;
+      return new Response(JSON.stringify({ ResponseCode: "0", CheckoutRequestID: "CHECK-AMOUNT" }), { status: 200 });
     }
     throw new Error(`unexpected URL ${url}`);
   }, async () => {
     const res = await provider.initiate(1, 33_750, "KES", "+254712345678");
-    assert.equal(res.ok, true);
+    assert.equal(res.ok, false);
+    assert.equal(res.status, "unavailable");
+    assert.match(res.msg ?? "", /whole Kenyan shillings/i);
   });
-  assert.ok(captured.stk);
-  assert.equal(Number(captured.stk.Amount) * 100, 33_750, "KES 337.50 must not silently become KES 338.00");
+  assert.equal(stkCalls, 0, "no STK request may be sent for a fractional total");
 });
 
-test("fractional-KES callback: parsed minor amount must equal the order total", () => {
+test("whole-shilling callback maps exactly to minor units, exposing fractional orders to reconciliation", () => {
   const raw = JSON.stringify({
     Body: { stkCallback: {
       MerchantRequestID: "MERCHANT-AMOUNT",
@@ -109,10 +111,11 @@ test("fractional-KES callback: parsed minor amount must equal the order total", 
   });
   const parsed = parseDarajaCallback(raw);
   assert.ok(parsed);
-  assert.equal(parsed.amountMinor, 33_750, "callback cents must reconcile to the order total");
+  assert.equal(parsed.amountMinor, 33_800);
+  assert.notEqual(parsed.amountMinor, 33_750, "a fractional order cannot be reconciled from a whole-shilling callback");
 });
 
-test("fractional-KES settlement: verified success must issue tickets", () => {
+test("fractional-KES settlement is blocked and never issues tickets", () => {
   const { orderId, totalMinor } = makeOrder(25_000);
   assert.equal(totalMinor, 33_750);
   recordInitiated(orderId, "daraja", "CHECK-SETTLE-33750", totalMinor, "KES", "+254712345678", "MERCHANT-SETTLE");
@@ -125,27 +128,17 @@ test("fractional-KES settlement: verified success must issue tickets", () => {
     currency: "KES",
     merchantRequestId: "MERCHANT-SETTLE",
   });
-  assert.equal(out.ok, true, out.detail);
-  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [orderId])!.lifecycle), "ticket_issued");
+  assert.match(out.detail, /amount mismatch/i);
+  assert.equal(String(queryOne("SELECT lifecycle FROM orders WHERE id=?", [orderId])!.lifecycle), "pending_payment");
+  assert.ok(queryOne("SELECT id FROM reconcile_exceptions WHERE order_id=?", [orderId]));
+  assert.equal(Number(queryOne("SELECT COUNT(*) n FROM tickets WHERE order_id=?", [orderId])!.n), 0);
 });
 
-test("one-cent payable amount must not round to zero", async () => {
-  const captured: { stk?: Record<string, unknown> } = {};
-  await withMockFetch(async (url, init) => {
-    if (url.includes("/oauth/")) {
-      return new Response(JSON.stringify({ access_token: "mock-token", expires_in: "3599" }), { status: 200 });
-    }
-    if (url.includes("/stkpush/")) {
-      captured.stk = JSON.parse(String(init?.body));
-      return new Response(JSON.stringify({ ResponseCode: "0", CheckoutRequestID: "CHECK-CENT", MerchantRequestID: "MERCHANT-CENT" }), { status: 200 });
-    }
-    throw new Error(`unexpected URL ${url}`);
-  }, async () => {
-    const res = await provider.initiate(3, 1, "KES", "+254712345678");
-    assert.equal(res.ok, true);
-  });
-  assert.ok(captured.stk);
-  assert.equal(Number(captured.stk.Amount) * 100, 1, "a one-cent payable amount must not become zero");
+test("one-cent payable amount is refused and never becomes zero", async () => {
+  const res = await provider.initiate(3, 1, "KES", "+254712345678");
+  assert.equal(res.ok, false);
+  assert.equal(res.status, "unavailable");
+  assert.match(res.msg ?? "", /whole Kenyan shillings/i);
 });
 
 test("provider rejection returns unavailable rather than throwing", async () => {

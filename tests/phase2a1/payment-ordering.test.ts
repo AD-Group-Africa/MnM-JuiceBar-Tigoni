@@ -1,9 +1,9 @@
 /**
  * Phase 2A.1 — payment initiation persistence ordering.
  *
- * The failing test forces the real checkout route's local payment insert to fail
- * after the provider (dev simulator) has accepted the request. That proves the
- * current order-of-operations leaves no recoverable local payment identity.
+ * The regression forces the real checkout route's local payment insert to fail
+ * before the provider is called. The safe contract is to abort with no orphan
+ * provider charge and no payment row.
  *
  * The later tests record the lifecycle primitives that already work: unique
  * provider IDs map to one row, and an unknown provider callback is rejected.
@@ -49,7 +49,7 @@ before(() => {
 
 after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } });
 
-test("provider acceptance followed by local insert failure leaves no recoverable payment identity", async () => {
+test("local payment persistence failure aborts before provider acceptance and leaves no orphan", async () => {
   const app = createApp(loadConfig(process.env));
   const originalPrepare = DatabaseSync.prototype.prepare;
   (DatabaseSync.prototype as unknown as { prepare: (sql: string) => unknown }).prepare = function (sql: string) {
@@ -71,8 +71,8 @@ test("provider acceptance followed by local insert failure leaves no recoverable
     const payment = queryOne("SELECT id FROM payments ORDER BY id DESC LIMIT 1");
     assert.deepEqual(
       { status: res.status, hasPayment: Boolean(payment) },
-      { status: 302, hasPayment: true },
-      "a provider-accepted checkout must leave a recoverable local payment identity",
+      { status: 500, hasPayment: false },
+      "checkout must fail locally before the provider can move money, leaving no orphan payment",
     );
   } finally {
     (DatabaseSync.prototype as unknown as { prepare: typeof originalPrepare }).prepare = originalPrepare;

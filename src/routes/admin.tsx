@@ -10,7 +10,7 @@ import type { AppConfig } from "../config.ts";
 import { SESSION_COOKIE, getSessionUser, roleAllows } from "../auth.ts";
 import { queryAll, queryOne } from "../db.ts";
 import { formatMinor } from "../money.ts";
-import { Page } from "../views/layout.tsx";
+import { StaffPage } from "../views/layout.tsx";
 
 export function adminRoutes(_config: AppConfig): Hono {
   const app = new Hono();
@@ -36,7 +36,7 @@ export function adminRoutes(_config: AppConfig): Hono {
     ) as Record<string, unknown>[];
     const events = queryAll("SELECT title, status, starts_at, organizer_name FROM events ORDER BY id DESC LIMIT 50") as Record<string, unknown>[];
     return c.html(
-      <Page title="AD platform console" active="/admin">
+      <StaffPage title="AD platform console" active="/admin">
         <h1>Afrika Digitalis — platform console</h1>
         <p class="muted">Restricted to AD administrators. Operational data only; personal data minimised.</p>
         <div class="stat-grid">
@@ -84,7 +84,7 @@ export function adminRoutes(_config: AppConfig): Hono {
             </tbody>
           </table>
         </div>
-      </Page>,
+      </StaffPage>,
     );
   });
 

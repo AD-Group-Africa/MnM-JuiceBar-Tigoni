@@ -10,6 +10,7 @@ import path from "node:path";
 
 process.env.NODE_ENV = "test";
 process.env.APP_SECRET_KEY = "test-secret-please-ignore-0123456789abcdef";
+process.env.PAYMENT_PROVIDER = "dev";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mnm-http-"));
 process.env.DATABASE_FILE = path.join(tmp, "http.sqlite");
 
@@ -153,4 +154,23 @@ test("customer cannot reach staff areas without a session", async () => {
   const res = await req("GET", "/staff/scan");
   assert.equal(res.status, 302);
   assert.match(res.headers.get("location") ?? "", /\/staff\/login/);
+});
+
+test("login accepts the phone format displayed on the site (spaces)", async () => {
+  // The public site prints "+254 705 687 273"; the account stores "+254705687273".
+  // Both must resolve to the same staff account.
+  const res = await req("POST", "/staff/login", new URLSearchParams({ phone: "+254 700 000 020", password: "ownerpw", next: "/staff" }), { Origin: BASE });
+  assert.equal(res.status, 302);
+  assert.ok(/mnm_session=/.test(res.headers.get("set-cookie") ?? ""), "spaced phone must sign in");
+  cookie = "";
+});
+
+test("login accepts a local loopback alias Origin outside production", async () => {
+  // Opening the app at http://127.0.0.1:8787 used to be rejected because only
+  // http://localhost:8787 was allow-listed. Development expands the aliases;
+  // production still compares exactly.
+  const res = await req("POST", "/staff/login", new URLSearchParams({ phone: "+254700000020", password: "ownerpw", next: "/staff" }), { Origin: "http://127.0.0.1:8787" });
+  assert.equal(res.status, 302);
+  assert.ok(/mnm_session=/.test(res.headers.get("set-cookie") ?? ""), "loopback alias must sign in");
+  cookie = "";
 });
