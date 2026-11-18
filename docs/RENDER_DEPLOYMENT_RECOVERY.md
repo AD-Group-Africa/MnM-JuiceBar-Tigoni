@@ -143,3 +143,34 @@ The following cannot be verified without account access:
 
 Once those are supplied, compare them with sections 3 and 4. No deployment has
 been performed by this change.
+
+## 8. Current state of this recovery (18 November 2026)
+
+Committed locally and pushed to `main` without force and without rewriting
+history:
+
+| Commit | Content |
+|---|---|
+| `6d09810` | `PAYMENT_PROVIDER=disabled`, production `BIND_HOST` default `0.0.0.0`, docs and tests |
+| `9019f03` | Regenerated 800×800 menu illustrations and their generator |
+
+Remote `main` after the push: `9019f033a96e980e5a062dfae9a9e8c400862c0a`
+(fast-forward from `c4c74a5`).
+
+Verified locally on the committed tree: `npm test` 109/109, regression runner
+39/39, typecheck exit 0, build exit 0, and a production startup with the
+disabled profile on a fresh database logging
+`listening on http://0.0.0.0:8792 (env=production, payments=disabled)` with
+`/health`, `/`, `/menu` and `/events` returning HTTP 200.
+
+Still unverified: whether Render rebuilt, which commit is live, the service
+environment variable names, the disk mount, `DATABASE_FILE`, the existing
+database contents and restart persistence. No Render URL, dashboard session,
+API key or `render.yaml` was available.
+
+**Do not change `DATABASE_FILE`** until the current disk contents are inspected
+and backed up. If a database already exists on the disk, point
+`DATABASE_FILE` at that exact file; migrations run forward automatically at
+boot and are the intended upgrade path. Never start the service against a new
+empty path while an existing production database holds orders, tickets,
+customers or payments.

@@ -105,6 +105,8 @@ All documentation is in `docs/`:
 - `OWNER_ONBOARDING.md` — what's built, owner decisions, setup steps, next five actions
 - `DEPLOYMENT.md` — dev setup, production deployment, health checks, rollback, env vars
 - `RENDER_DEPLOYMENT_RECOVERY.md` — payment-disabled Render configuration, disk/health requirements and manual recovery steps
+- `RELEASE_STATUS.md` — current release state: verified evidence, payment mode, dependency fixes, cleanup and blockers
+- `commercial/` — draft agreements and proposals (IP/data ownership, maintenance, revenue share); nothing there is an approved term
 - `TEST_REPORT.md` — test suite summary, categories, execution, limitations, performance
 - `PILOT_READINESS.md` — explicit pass/fail criteria, numerical assessment (75/100), next five actions
 - `PROJECT_CHECKLIST.md` — phased checklist (Phase 0–5), outstanding decisions
