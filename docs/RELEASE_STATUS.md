@@ -224,3 +224,57 @@ signed out in the available browser session and no API key is present.
    DNS) individually; none are activated by this work.
 6. Review the commercial drafts and replace `[TO BE AGREED]` fields before any
    is treated as an agreement.
+
+## 11. Live deployment result (18 November 2026, 13:05 GMT+3)
+
+The startup failure was caused by the Render service supplying
+`PAYMENT_PROVIDER=dev`. It was set on the service itself (no `render.yaml`,
+blueprint or environment group exists; the project has 0 env groups). The
+variable was changed to `disabled`, keeping every other variable untouched, and
+the service was redeployed.
+
+| Item | Value |
+|---|---|
+| Live URL | `https://mnm-juicebar-tigoni.onrender.com` |
+| Deployed commit | `73608ea` (`73608eac21b91ea51faa8ef57935c3a9a11153c8`) |
+| Deploy result | Succeeded, 30.8s, trigger "Environment updated" |
+| Runtime log | `[mnm-tickets] listening on http://0.0.0.0:10000 (env=production, payments=disabled)` |
+| Migrations | `0001`–`0009` applied on boot |
+| Dependency audit in build | `found 0 vulnerabilities` |
+| Health check path | `/health` (was empty; set during this recovery) |
+| Build command | `npm install --include=dev && npm run migrate` |
+| Start command | `node --import tsx src/server.ts` |
+| Instance | Free (Frankfurt) — **no persistent disk**, ephemeral database |
+
+Verified against the live origin after the deploy:
+
+| Check | Result |
+|---|---|
+| `GET /health` | 200 `{"ok":true,"service":"mnm-tickets",...}` |
+| `/`, `/menu`, `/events`, `/cart`, `/about`, `/catering`, `/contact`, `/tickets`, `/staff/login` | 200; `/juice` → 301 |
+| `/juice-health` | 200, `productCount: 14` |
+| `GET /menu/fj-001.svg` | MD5 identical to the committed 800×800 asset → deployed build matches `73608ea` |
+| `POST /checkout` (ticket) | **503**, body "Online ticket payment is unavailable / No order was created" |
+| `/events` | 200, **0** checkout forms |
+| Juice pickup order | Created (`MNM-J-3687000001`), confirmation renders "Awaiting collection" and "Thank you" |
+| Same order URL without its token | **403** with a phone-number gate |
+| Delivery minimum / size validation | Rejected with a clear message when an invalid size was submitted |
+
+### Data and disk caveat
+
+The Free plan cannot mount a persistent disk (the Disk page redirects; the shell
+modal lists "Persistent Disks" and "Web shell" as Starter features). The
+database therefore lives at the default `data/mnm-dev.sqlite` on an **ephemeral**
+filesystem and is recreated on every deploy or restart. Nothing is lost that the
+repository cannot rebuild: migrations `0001`–`0009` seed the 14-product juice
+catalogue (`INSERT OR IGNORE INTO products`), which is exactly what the live
+`productCount: 14` reflects. Any real order, ticket or customer account created
+on the live site **will be lost** on the next deploy, restart or idle spin-down.
+
+Order, ticket and customer data cannot be preserved until the service is on a
+plan with a persistent disk and `DATABASE_FILE` points at it (for example
+`/var/data/mnm.sqlite`). Do not switch plans or paths without first exporting
+current data, because the shell is also unavailable on Free.
+
+The juice order `MNM-J-3687000001` was created by this verification and is safe
+to delete or ignore; it is demo-scale test data, not a customer order.
