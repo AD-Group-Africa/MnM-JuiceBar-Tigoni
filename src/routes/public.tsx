@@ -97,7 +97,7 @@ function EventCard({ event: e }: { event: PublicEvent }) {
   );
 }
 
-export function publicRoutes(_config: AppConfig): Hono {
+export function publicRoutes(config: AppConfig): Hono {
   const app = new Hono();
 
   // The ticketing platform's own landing page. The site root is the MnM Juice
@@ -224,10 +224,21 @@ export function publicRoutes(_config: AppConfig): Hono {
                 </div>
               </div>
               {ev.description ? <p class="muted">{ev.description}</p> : null}
-              <p class="notice warn">
-                <strong>Demonstration ticketing — payment is simulated.</strong>{" "}
-                No M-Pesa prompt is sent and no money moves. Every ticket is real in the system and can be scanned.
-              </p>
+              {config.paymentProvider === "disabled" ? (
+                <p class="notice bad">
+                  <strong>Online ticket sales are temporarily unavailable.</strong>{" "}
+                  No payment can be taken and no ticket order will be created. Please check back later or contact MnM Juice Bar for help.
+                </p>
+              ) : config.paymentProvider === "dev" ? (
+                <p class="notice warn">
+                  <strong>Demonstration ticketing — payment is simulated.</strong>{" "}
+                  No M-Pesa prompt is sent and no money moves. Every ticket is real in the system and can be scanned.
+                </p>
+              ) : (
+                <p class="notice ok">
+                  <strong>Secure M-Pesa payment.</strong> Complete checkout to receive an STK prompt on your phone. Tickets are issued only after the payment provider confirms.
+                </p>
+              )}
             </div>
             <div class="event-poster">
               {ev.image_url ? <img src={ev.image_url} alt={ev.title} /> : artCell(ev.title, null)}
@@ -271,7 +282,9 @@ export function publicRoutes(_config: AppConfig): Hono {
                     <div class="price-line"><span>Platform fee (Afrika Digitalis)</span><span>{formatMinor(ad, LAUNCH_TERMS.currency)}</span></div>
                   </details>
 
-                  {avail <= 0 ? (
+                  {config.paymentProvider === "disabled" ? (
+                    <p class="tier-sold-out">Online sales are paused — no order will be created until payment is restored.</p>
+                  ) : avail <= 0 ? (
                     <p class="tier-sold-out">Sold out — this tier has no tickets left.</p>
                   ) : (
                     <form method="post" action="/checkout" class="tier-form">
@@ -282,7 +295,7 @@ export function publicRoutes(_config: AppConfig): Hono {
                           <input id={`name-${cat.id}`} name="name" type="text" maxlength={80} required placeholder="e.g. Wanjiku Kamau" />
                         </div>
                         <div class="field">
-                          <label for={`phone-${cat.id}`}>Phone (M-Pesa)</label>
+                          <label for={`phone-${cat.id}`}>{config.paymentProvider === "daraja" ? "Phone (M-Pesa)" : "Phone"}</label>
                           <input id={`phone-${cat.id}`} name="phone" type="tel" maxlength={20} required placeholder="07… or +2547…" pattern="(\+?254|0)[17]\d{8}" title="Kenyan mobile number, e.g. 0712345678" />
                         </div>
                         <div class="field">

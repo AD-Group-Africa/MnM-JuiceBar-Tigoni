@@ -24,7 +24,7 @@ npm run dev
 
 # 6. Run the full test suite
 npm test
-# All 36 tests should pass
+# All 109 tests should pass
 ```
 
 ## Available scripts
@@ -34,7 +34,7 @@ npm test
 | `npm run dev` | Start development server with `tsx watch src/server.ts` |
 | `npm run build` | Compile TypeScript to `dist/` (production build) |
 | `npm run typecheck` | Run `tsc -p tsconfig.json --noEmit` (clean = no errors) |
-| `npm test` | Run full test suite (36 tests: 29 unit/integration + 7 HTTP) |
+| `npm test` | Run full test suite (109 tests) |
 | `npm run seed` | Seed development data (aborts if NODE_ENV=production) |
 | `npm run migrate` | Apply pending SQLite migrations in filename order |
 
@@ -45,7 +45,7 @@ npm test
 - **Database**: SQLite (development, node:sqlite built-in); PostgreSQL (production target, migrations portable)
 - **Auth**: Custom scrypt passwords + SHA-256 opaque session tokens + SameSite=Lax cookies + origin checks
 - **Tests**: `node:test` + `tsx` — no heavy framework dependency; keeps install tiny
-- **Payments**: Daraja (M-Pesa STK Push) adapter structure + clearly-labelled development simulator
+- **Payments**: Daraja (M-Pesa STK Push) adapter, clearly-labelled development simulator, and an explicit production-safe `disabled` mode
 - **QR codes**: Hand-encoded ISO/IEC 18004 (verified against Nayuki/Thonky tables), no external library
 
 ## Project structure
@@ -62,12 +62,13 @@ mnm-tickets/
 │   ├── payments/
 │   │   ├── index.ts        # Provider abstraction + initiate/callback/idempotent settle
 │   │   ├── daraja.ts       # Daraja (M-Pesa STK) adapter structure
-│   │   └── dev.ts          # Development simulator (clearly labelled)
+│   │   ├── dev.ts          # Development simulator (clearly labelled)
+│   │   └── disabled.ts     # Fail-closed disabled provider (production safe)
 │   ├── notify.ts           # Notification interfaces + console dev adapter
 │   ├── views/              # JSX layout & page components
 │   └── routes/             # Route handlers (public, staff, admin, checkout, verify-scan)
 ├── db/migrations/          # Versioned SQL migrations (applied in filename order)
-├── docs/                   # Documentation (12 files)
+├── docs/                   # Documentation (see Documentation below)
 ├── tests/                  # Test files (node:test)
 │   ├── money.test.ts
 │   ├── orders.test.ts
@@ -89,7 +90,7 @@ mnm-tickets/
 - Ticket issuance: unique digital tickets with QR codes, online verification
 - Payment abstraction: dev simulator + Daraja adapter (live BLOCKED pending credentials)
 - Role-based access: owner, manager, sales_staff, scanner, ad_admin
-- Full test suite: 36 tests pass (100% business logic coverage)
+- Full automated suite: 109 tests pass across unit, integration and HTTP coverage
 
 ## Documentation
 
@@ -103,6 +104,7 @@ All documentation is in `docs/`:
 - `SECURITY_AND_PRIVACY.md` — server-side security, data privacy, Kenyan data protection considerations
 - `OWNER_ONBOARDING.md` — what's built, owner decisions, setup steps, next five actions
 - `DEPLOYMENT.md` — dev setup, production deployment, health checks, rollback, env vars
+- `RENDER_DEPLOYMENT_RECOVERY.md` — payment-disabled Render configuration, disk/health requirements and manual recovery steps
 - `TEST_REPORT.md` — test suite summary, categories, execution, limitations, performance
 - `PILOT_READINESS.md` — explicit pass/fail criteria, numerical assessment (75/100), next five actions
 - `PROJECT_CHECKLIST.md` — phased checklist (Phase 0–5), outstanding decisions

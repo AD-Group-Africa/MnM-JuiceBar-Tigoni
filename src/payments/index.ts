@@ -9,6 +9,7 @@ import { queryAll, queryOne, run } from "../db.ts";
 import { nowIso, settleOrderPaid, LIFECYCLE } from "../orders.ts";
 import { DevSimulator } from "./dev.ts";
 import { DarajaProvider } from "./daraja.ts";
+import { DisabledPaymentProvider } from "./disabled.ts";
 
 export interface InitiateResult {
   ok: boolean;
@@ -33,6 +34,7 @@ export function getProvider(config: AppConfig): PaymentProvider {
   // silently turn a real checkout into a simulated success.
   if (config.paymentProvider === "daraja") return new DarajaProvider(config);
   if (config.paymentProvider === "dev") return new DevSimulator(config);
+  if (config.paymentProvider === "disabled") return new DisabledPaymentProvider();
   throw new Error(`[payments] unsupported provider: ${String(config.paymentProvider)}`);
 }
 

@@ -12,7 +12,7 @@ export interface AppConfig {
   publicOrigins: string[];
   appSecretKey: Buffer;
   databaseFile: string;
-  paymentProvider: "dev" | "daraja";
+  paymentProvider: "dev" | "daraja" | "disabled";
   paymentDevForceStatus: "" | "success" | "failure";
   mpesa: {
     env: "sandbox" | "production";
@@ -77,16 +77,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   // Payment selection is deliberately explicit and fail-closed. A missing or
   // misspelled value must never silently select the development simulator.
+  // `disabled` is a supported production mode: the storefront still runs, but
+  // ticket checkout refuses to create an order or start a payment.
   const rawProvider = (env.PAYMENT_PROVIDER ?? "").trim().toLowerCase();
   if (!rawProvider) {
-    throw new Error("[config] PAYMENT_PROVIDER is required. Use 'dev' only for local simulation or 'daraja' for live M-Pesa.");
+    throw new Error("[config] PAYMENT_PROVIDER is required. Use 'dev' for local simulation, 'daraja' for live M-Pesa, or 'disabled' to run without online payments.");
   }
-  if (rawProvider !== "dev" && rawProvider !== "daraja") {
-    throw new Error(`[config] Unknown PAYMENT_PROVIDER "${rawProvider}". Expected 'dev' or 'daraja'.`);
+  if (rawProvider !== "dev" && rawProvider !== "daraja" && rawProvider !== "disabled") {
+    throw new Error(`[config] Unknown PAYMENT_PROVIDER "${rawProvider}". Expected 'dev', 'daraja' or 'disabled'.`);
   }
   const provider: AppConfig["paymentProvider"] = rawProvider;
-  if (isProduction && provider !== "daraja") {
-    throw new Error("[config] PAYMENT_PROVIDER=dev is not allowed in production. Configure 'daraja' with live credentials.");
+  if (isProduction && provider === "dev") {
+    throw new Error("[config] PAYMENT_PROVIDER=dev is not allowed in production. Use 'disabled' without live payments or 'daraja' with live credentials.");
   }
 
   const rawMpesaEnv = (env.MPESA_ENV ?? "sandbox").trim().toLowerCase();
@@ -124,7 +126,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     env: nodeEnv,
     port: Number(env.PORT ?? 8787) || 8787,
-    bindHost: env.BIND_HOST ?? "127.0.0.1",
+    // Render (and most container platforms) route traffic to the container's
+    // external interface, not to loopback. Production defaults to 0.0.0.0 so a
+    // missing BIND_HOST cannot make a healthy process unreachable.
+    bindHost: env.BIND_HOST ?? (nodeEnv === "production" ? "0.0.0.0" : "127.0.0.1"),
     publicOrigins,
     appSecretKey: appSecretKey.length >= 32
       ? Buffer.from(appSecretKey, "hex").length === appSecretKey.length / 2

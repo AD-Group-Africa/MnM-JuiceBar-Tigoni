@@ -27,6 +27,23 @@ export function checkoutRoutes(config: AppConfig): Hono {
     // loopback aliases) rather than silently comparing against only the first.
     const originOk = stateChangeOriginAllowed(c, config.publicOrigins);
     if (!originOk) return c.html(<Page title="Blocked"><div class="panel notice bad">Cross-origin checkout is not allowed.</div></Page>, 403);
+    // Fail before createOrder(): a disabled provider must not reserve inventory,
+    // create an order or leave a pending payment row behind.
+    if (config.paymentProvider === "disabled") {
+      return c.html(
+        <Page title="Ticket payments unavailable">
+          <div class="narrow">
+            <div class="panel notice bad">
+              <h1>Online ticket payment is unavailable</h1>
+              <p>No order was created and no payment was taken. Online ticket sales are temporarily paused.</p>
+              <p class="muted">Please check back later, or contact MnM Juice Bar on +254 705 687 273 for help.</p>
+              <p><a class="btn btn-primary" href="/events">Back to events</a></p>
+            </div>
+          </div>
+        </Page>,
+        503,
+      );
+    }
     const form = await c.req.parseBody();
     const categoryId = Number(form.category_id);
     const qty = Number(form.qty);
@@ -156,7 +173,12 @@ function orderStatusPage(order: Record<string, unknown>, token: string, config: 
           <div class="steps"><span class="on">1 Order</span> ▸ <span class={issued ? "on" : ""}>2 Pay</span> ▸ <span class={issued ? "on" : ""}>3 Tickets</span></div>
           <h1>{issued ? "Asante! Your tickets are ready" : `Order ${ref}`}</h1>
           <p class="muted">{String(ev.title)} · {String(ev.venue_name)}, {String(ev.venue_area)}</p>
-          {config.paymentProvider === "dev" ? (
+          {config.paymentProvider === "disabled" ? (
+            <p class="notice bad" role="status">
+              <strong>Online payment is disabled.</strong>{" "}
+              This order is not paid. No payment provider was contacted; contact the bar to arrange payment.
+            </p>
+          ) : config.paymentProvider === "dev" ? (
             <p class="notice warn" role="status">
               <strong>Development payment simulator — no real money moved.</strong>{" "}
               This order was settled by the local simulator; no M-Pesa prompt was sent and no card was charged.

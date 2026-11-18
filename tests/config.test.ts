@@ -39,6 +39,34 @@ test("production rejects the dev simulator", () => {
   );
 });
 
+test("production accepts explicit disabled payments without Daraja credentials", () => {
+  const config = loadConfig({
+    ...base,
+    NODE_ENV: "production",
+    PAYMENT_PROVIDER: "disabled",
+    PUBLIC_ORIGINS: "https://tickets.example.test",
+  });
+  assert.equal(config.paymentProvider, "disabled");
+  assert.equal(config.env, "production");
+  assert.equal(config.bindHost, "0.0.0.0");
+  assert.equal(getProvider(config).name, "disabled");
+});
+
+test("disabled payment mode refuses to initiate any payment", async () => {
+  const config = loadConfig({ ...base, PAYMENT_PROVIDER: "disabled" });
+  const result = await getProvider(config).initiate(1, 100_000, "KES", "+254712345678");
+  assert.equal(result.ok, false);
+  assert.equal(result.status, "unavailable");
+  assert.match(result.msg ?? "", /disabled/i);
+});
+
+test("dev-only force status cannot be combined with disabled payments", () => {
+  assert.throws(
+    () => loadConfig({ ...base, PAYMENT_PROVIDER: "disabled", PAYMENT_DEV_FORCE_STATUS: "success" }),
+    /only valid with PAYMENT_PROVIDER=dev/,
+  );
+});
+
 test("daraja requires all credentials even outside production", () => {
   assert.throws(
     () => loadConfig({ ...base, PAYMENT_PROVIDER: "daraja" }),

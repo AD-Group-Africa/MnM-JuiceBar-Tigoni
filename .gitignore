@@ -12,6 +12,7 @@ node_modules/**/.bin
 .claude
 
 # Local runtime artifacts (never commit)
+.freebuff/
 *.pid
 b1.*
 c4*.out
