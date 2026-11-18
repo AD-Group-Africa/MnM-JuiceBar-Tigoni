@@ -72,6 +72,25 @@ duplicate redemption, guest order access tokens, customer accounts and session
 handling, delivery minimums, origin checks on state-changing requests, and
 production configuration guards.
 
+Additional scripted end-to-end run (`node scripts/verify-demo.mjs` against a
+development server with the labelled dev simulator, seeded demo database):
+**33/33 checks passed**, covering all public pages, staff login and cookie
+flags, pickup and delivery orders with server-side repricing and delivery
+minimums, the order status machine including refused invalid jumps, role
+restrictions for sales/scanner/anonymous, ticket purchase, QR ticket issue,
+first-scan admit, duplicate-scan refusal and scan history.
+
+**Payment-disabled production checks, run directly against `dist/server.js`:**
+`POST /checkout` returns 503 with `orders`, `payments` and `tickets` all at 0;
+an event page returns 200 with the text "Online ticket sales are temporarily
+unavailable." and zero forms; a juice pickup order in the same disabled
+configuration is created and its confirmation renders "Awaiting collection"
+(13 juice orders present from the demo seed, 0 ticket orders).
+
+**Migration compatibility:** a fresh database applied migrations `0001`–`0009`;
+an immediate re-run applied 0 (idempotent); a copy of a pre-`0008` database
+applied `0008` and `0009` forward with 27 tables intact.
+
 **Not performed:** real-device camera/QR scanning, load or soak testing,
 penetration testing, accessibility audit, multi-instance testing, and any
 Render-side verification (section 4).
